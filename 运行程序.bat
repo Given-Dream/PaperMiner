@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal EnableDelayedExpansion
 chcp 65001 >nul
 
@@ -27,10 +27,22 @@ for %%I in (conda.exe) do if exist "%%~$PATH:I" (
 for %%P in (
     "%USERPROFILE%\miniconda3"
     "%USERPROFILE%\anaconda3"
+    "%USERPROFILE%\Miniconda3"
+    "%USERPROFILE%\Anaconda3"
     "C:\ProgramData\miniconda3"
     "C:\ProgramData\anaconda3"
+    "C:\ProgramData\Miniconda3"
+    "C:\ProgramData\Anaconda3"
     "%LOCALAPPDATA%\miniconda3"
     "%LOCALAPPDATA%\anaconda3"
+    "D:\miniconda3"
+    "D:\anaconda3"
+    "D:\Miniconda3"
+    "D:\Anaconda3"
+    "E:\miniconda3"
+    "E:\anaconda3"
+    "E:\Miniconda3"
+    "E:\Anaconda3"
 ) do (
     if exist "%%~P\condabin\conda.bat" (
         set "CONDA_BAT=%%~P\condabin\conda.bat"
@@ -38,15 +50,33 @@ for %%P in (
     )
 )
 
-:: If not found, provide friendly message
+:: Method 3: Let user input manually
+echo Conda not found automatically.
+echo.
+echo If Conda is installed, please enter the path.
+echo Example: D:\Anaconda3
+echo Enter "q" to quit.
+echo.
+:conda_input
+set /p "CONDA_INPUT=Conda install path: "
+if /i "!CONDA_INPUT!"=="q" goto :conda_not_found
+if "!CONDA_INPUT!"=="" goto :conda_not_found
+if exist "!CONDA_INPUT!\condabin\conda.bat" (
+    set "CONDA_BAT=!CONDA_INPUT!\condabin\conda.bat"
+    goto :conda_found
+)
+echo   Not found at: !CONDA_INPUT!\condabin\conda.bat
+echo   Please check and try again.
+echo.
+goto :conda_input
+
+:conda_not_found
 echo ========================================
 echo Conda installation not found
 echo ========================================
-echo Please install Anaconda or Miniconda first
-echo Download: https://www.anaconda.com/products/distribution
-echo Or: https://docs.conda.io/en/latest/miniconda.html
+echo Please install Miniconda first:
+echo   https://docs.conda.io/en/latest/miniconda.html
 echo.
-echo Please run this script again after installation
 pause
 exit /b 1
 
@@ -88,23 +118,24 @@ if not exist "%PYTHON_EXE%" (
     exit /b 1
 )
 
-:: Activate environment (for environment variables)
-echo Activating %ENV_NAME% environment...
-call "%CONDA_BAT%" activate %ENV_NAME%
-if errorlevel 1 (
-    echo ========================================
-    echo Environment activation failed
-    echo ========================================
-    echo Please check if the environment is properly installed
-    pause
-    exit /b 1
-)
+:: Avoid "conda activate" side effects on some machines (OpenCL temp.txt warning, etc.)
+:: Use the environment Python directly and prepend essential env paths.
+echo Preparing runtime PATH for %ENV_NAME%...
+set "PATH=%ENV_PATH%;%ENV_PATH%\Scripts;%ENV_PATH%\Library\bin;%ENV_PATH%\Library\usr\bin;%PATH%"
 
 :: Set environment variables to avoid OpenMP conflicts and charset warnings
 echo Setting environment variables to prevent runtime conflicts...
 set "KMP_DUPLICATE_LIB_OK=TRUE"
 set "OMP_NUM_THREADS=1"
 set "PYTHONIOENCODING=utf-8"
+set "PYTHONNOUSERSITE=1"
+
+:: MinerU 3.0+: Set model source for auto-download
+:: ModelScope is recommended for China (HuggingFace may be inaccessible)
+if not defined MINERU_MODEL_SOURCE (
+    set "MINERU_MODEL_SOURCE=modelscope"
+)
+echo Model source: %MINERU_MODEL_SOURCE% (set MINERU_MODEL_SOURCE=huggingface to change)
 
 :: Check if GUI script exists
 echo Checking if GUI script exists...
@@ -132,6 +163,16 @@ echo %PYTHON_EXE%
 echo.
 echo Installed packages (showing key ones):
 "%PYTHON_EXE%" -m pip list | findstr -i "mineru torch pandas"
+echo.
+
+:: PyTorch and CUDA status check
+echo ----------------------------------------
+echo PyTorch / GPU Status:
+"%PYTHON_EXE%" -c "import torch;cuda=torch.cuda.is_available();ver=torch.version.cuda if cuda else 'N/A';dev=torch.cuda.get_device_name(0) if cuda else 'N/A';print(f'  PyTorch: {torch.__version__}');print(f'  CUDA available: {cuda}');print(f'  CUDA version: {ver}');print(f'  GPU device: {dev}')" 2>nul
+if errorlevel 1 (
+    echo   [WARNING] PyTorch not installed or import failed!
+    echo   Please run "一键安装.bat" to fix.
+)
 echo.
 
 :: Run Python GUI program

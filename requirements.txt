@@ -1,0 +1,14 @@
+# PaperMiner - Python 依赖
+# 注意：mineru[core]>=3.1.0,<4.0 和 torch 需要通过 conda 环境安装（见一键安装.bat），不在此文件中
+
+# 核心依赖（PDF 内容提取必需）
+ttkbootstrap>=2.2.2,<3.0
+pandas>=1.5.0
+openpyxl>=3.0.0
+beautifulsoup4>=4.12.0
+python-docx>=0.8.11
+lxml>=4.9.0
+
+# LLM 功能（可选，用于智能章节提取）
+requests>=2.28.0
+python-dotenv>=0.21.0

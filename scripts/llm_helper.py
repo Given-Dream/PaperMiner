@@ -1,44 +1,79 @@
-"""
-LLM 辅助模块
-用于调用 Deepseek API 进行论文章节提取
-"""
+# -*- coding: utf-8 -*-
+"""LLM 辅助模块，用于调用 DeepSeek 或自定义 OpenAI 兼容接口。"""
 
-import os
 import json
+import re
 import requests
 from pathlib import Path
 from typing import Dict, Optional, List
-from dotenv import load_dotenv
+
+from llm_config import (
+    DEEPSEEK_API_BASE,
+    DEFAULT_DEEPSEEK_MODEL,
+    build_auth_headers,
+    endpoint_url,
+    load_llm_settings,
+)
 
 
 class LLMHelper:
-    """LLM 辅助类，使用 Deepseek API"""
+    """LLM 辅助类，支持 DeepSeek 和自定义 OpenAI 兼容接口。"""
 
-    def __init__(self, model_name: str = "deepseek"):
+    def __init__(self, model_name: Optional[str] = None,
+                 provider: Optional[str] = None,
+                 env_path: Optional[Path] = None,
+                 require_api: bool = True):
         """
         初始化 LLM Helper
 
         Args:
-            model_name: 模型名称，目前仅支持 "deepseek"
+            model_name: 实际模型 ID。兼容旧调用：传入 "deepseek"/"custom"
+                且未指定 provider 时，会将其解释为接口类型。
+            provider: "deepseek" 或 "custom"；为空时读取 .env。
+            env_path: 可选的 .env 路径，主要用于测试。
+            require_api: 是否在配置缺失时立即报错。GUI 的正则回退流程会设为
+                False，使未配置 API 时仍可完成纯正则章节提取。
         """
-        self.model_name = model_name.lower()
+        settings = load_llm_settings(env_path)
+        requested_model = (model_name or "").strip()
+        legacy_provider = requested_model.lower()
+        if provider is None and legacy_provider in {"deepseek", "custom"}:
+            provider = legacy_provider
+            requested_model = ""
 
-        # 加载 .env 文件
-        env_path = Path(__file__).parent.parent / ".env"
-        load_dotenv(env_path)
-
-        # 获取 API 配置
-        if self.model_name == "deepseek":
-            self.api_key = os.getenv("DEEPSEEK_API_KEY")
-            self.api_endpoint = "https://api.deepseek.com/v1/chat/completions"
+        self.provider = (provider or settings.provider).strip().lower()
+        self.configuration_error = ""
+        if self.provider == "deepseek":
+            self.api_key = settings.deepseek_api_key
+            self.api_base_url = DEEPSEEK_API_BASE
+            self.model_name = (
+                requested_model or settings.deepseek_model or DEFAULT_DEEPSEEK_MODEL
+            )
+            if not self.api_key or self.api_key == "sk-your_deepseek_api_key_here":
+                self.configuration_error = "未找到有效的 DeepSeek API Key，请在设置中配置"
+        elif self.provider == "custom":
+            self.api_key = settings.custom_api_key
+            self.api_base_url = settings.custom_api_base_url
+            self.model_name = requested_model or settings.active_model
+            if not self.api_base_url:
+                self.configuration_error = "未配置自定义 API 地址，请先在设置中测试并保存"
+            elif not self.model_name:
+                self.configuration_error = "未选择自定义模型，请先在设置中勾选并保存"
         else:
-            raise ValueError(f"不支持的模型: {model_name}，目前仅支持 'deepseek'")
+            raise ValueError(f"不支持的接口类型: {self.provider}")
 
-        if not self.api_key:
-            raise ValueError(f"未找到 DEEPSEEK API Key，请检查 .env 文件")
+        self.api_endpoint = ""
+        if self.api_base_url:
+            try:
+                self.api_endpoint = endpoint_url(self.api_base_url, "chat/completions")
+            except ValueError as exc:
+                self.configuration_error = f"API 地址无效: {exc}"
+
+        if require_api and self.configuration_error:
+            raise ValueError(self.configuration_error)
     
     def call_llm(self, prompt: str, max_tokens: int = 4000, temperature: float = 0.1,
-                  max_retries: int = 3, verbose: bool = True, json_mode: bool = False) -> Optional[str]:
+                  max_retries: int = 1, verbose: bool = True, json_mode: bool = False) -> Optional[str]:
         """调用 LLM API（带重试机制）
 
         Args:
@@ -47,12 +82,17 @@ class LLMHelper:
             temperature: 温度参数（越低越确定）
             max_retries: 最大重试次数
             verbose: 是否显示详细信息
-            json_mode: 是否启用结构化 JSON 输出（仅 Deepseek 有效）
+            json_mode: 是否请求结构化 JSON 输出
 
         Returns:
             LLM 返回的文本，失败返回 None
         """
         import time
+
+        if self.configuration_error:
+            if verbose:
+                print(f"    ⚠️  {self.configuration_error}，跳过 LLM 调用")
+            return None
 
         # 显示请求信息
         if verbose:
@@ -63,7 +103,9 @@ class LLMHelper:
             print(f"       - 估计 Token 数: ~{estimated_tokens:,} tokens")
             print(f"       - 最大返回 Token: {max_tokens:,} tokens")
             print(f"       - 温度参数: {temperature}")
-            print(f"       - API 端点: {self.model_name.upper()}")
+            provider_label = "DeepSeek" if self.provider == "deepseek" else "自定义接口"
+            print(f"       - API 接口: {provider_label}")
+            print(f"       - 模型: {self.model_name}")
 
         for attempt in range(max_retries):
             try:
@@ -72,8 +114,9 @@ class LLMHelper:
                 if verbose and attempt > 0:
                     print(f"    🔄 第 {attempt + 1} 次尝试...")
 
-                # 调用 Deepseek API（启用 JSON 模式如果需要）
-                result = self._call_deepseek(prompt, max_tokens, temperature, json_mode=json_mode)
+                result = self._call_openai_compatible(
+                    prompt, max_tokens, temperature, json_mode=json_mode
+                )
 
                 elapsed_time = time.time() - start_time
 
@@ -97,10 +140,24 @@ class LLMHelper:
                 else:
                     print(f"    ❌ API 调用超时（{elapsed_time:.1f} 秒），已重试 {max_retries} 次，放弃")
                     return None
+            except requests.exceptions.HTTPError as e:
+                # 4xx 是语义错误（请求本身问题），重试也救不回来
+                elapsed_time = time.time() - start_time
+                status = getattr(getattr(e, 'response', None), 'status_code', 0)
+                if 400 <= status < 500:
+                    print(f"    ❌ LLM 调用被拒绝（{elapsed_time:.1f} 秒, HTTP {status}）: {str(e)}，不重试")
+                    return None
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3
+                    print(f"    ⚠️  LLM HTTP 错误（{elapsed_time:.1f} 秒, HTTP {status}）: {str(e)}，{wait_time} 秒后重试（第 {attempt + 1}/{max_retries} 次）...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"    ❌ LLM HTTP 错误（{elapsed_time:.1f} 秒, HTTP {status}）: {str(e)}")
+                    return None
             except Exception as e:
                 elapsed_time = time.time() - start_time
                 if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 3  # 3秒, 6秒, 9秒
+                    wait_time = (attempt + 1) * 3  # 3秒
                     print(f"    ⚠️  LLM 调用失败（{elapsed_time:.1f} 秒）: {str(e)}，{wait_time} 秒后重试（第 {attempt + 1}/{max_retries} 次）...")
                     time.sleep(wait_time)
                 else:
@@ -109,16 +166,15 @@ class LLMHelper:
 
         return None
 
-    def _call_deepseek(self, prompt: str, max_tokens: int, temperature: float,
-                        json_mode: bool = False) -> Optional[str]:
-        """调用 Deepseek API"""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
+    def _call_openai_compatible(self, prompt: str, max_tokens: int, temperature: float,
+                                json_mode: bool = False) -> Optional[str]:
+        """调用 OpenAI 兼容接口（流式接收，避免长生成时 read timeout）。"""
+        import json as _json
+
+        headers = build_auth_headers(self.api_key)
 
         data = {
-            "model": "deepseek-chat",
+            "model": self.model_name,
             "messages": [
                 {
                     "role": "user",
@@ -126,22 +182,55 @@ class LLMHelper:
                 }
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature
+            "temperature": temperature,
+            # 开启流式：边生成边下发 chunk，连接保持活跃；用 requests.iter_lines 聚合 SSE
+            "stream": True,
         }
 
-        # 当需要结构化 JSON 输出时，启用 Deepseek 的 JSON Output 功能
+        # DeepSeek 支持 stream_options；部分自定义接口会拒绝这个扩展字段。
+        if self.provider == "deepseek":
+            data["stream_options"] = {"include_usage": True}
+
         if json_mode:
             data["response_format"] = {"type": "json_object"}
 
-        # 增加超时时间到 120 秒（处理长文档）
-        response = requests.post(self.api_endpoint, headers=headers, json=data, timeout=120)
+        # (connect_timeout, read_timeout)：连接 10s，单 chunk 间隔最多 90s
+        response = requests.post(
+            self.api_endpoint, headers=headers, json=data,
+            stream=True, timeout=(10, 90),
+        )
         response.raise_for_status()
 
-        result = response.json()
+        content_parts = []
+        usage = None
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    if payload == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = _json.loads(payload)
+                except Exception:
+                    continue
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    piece = delta.get("content")
+                    if piece:
+                        content_parts.append(piece)
+                chunk_usage = chunk.get("usage")
+                if chunk_usage:
+                    usage = chunk_usage
+        finally:
+            response.close()
 
-        # 显示 API 使用信息（如果有）
-        if "usage" in result:
-            usage = result["usage"]
+        if usage:
             print(f"    📈 API 使用统计:")
             if "prompt_tokens" in usage:
                 print(f"       - 输入 Token: {usage['prompt_tokens']:,}")
@@ -149,21 +238,17 @@ class LLMHelper:
                 print(f"       - 输出 Token: {usage['completion_tokens']:,}")
             if "total_tokens" in usage:
                 print(f"       - 总计 Token: {usage['total_tokens']:,}")
-
-            # 估算成本（Deepseek 价格：输入 ¥0.001/1K tokens，输出 ¥0.002/1K tokens）
-            if "prompt_tokens" in usage and "completion_tokens" in usage:
+            if (
+                self.provider == "deepseek"
+                and "prompt_tokens" in usage
+                and "completion_tokens" in usage
+            ):
                 input_cost = usage["prompt_tokens"] / 1000 * 0.001
                 output_cost = usage["completion_tokens"] / 1000 * 0.002
                 total_cost = input_cost + output_cost
                 print(f"       - 估算成本: ¥{total_cost:.4f} (输入: ¥{input_cost:.4f}, 输出: ¥{output_cost:.4f})")
 
-        # 提取生成的文本
-        if "choices" in result and len(result["choices"]) > 0:
-            choice = result["choices"][0]
-            if "message" in choice and "content" in choice["message"]:
-                return choice["message"]["content"]
-
-        return None
+        return "".join(content_parts) if content_parts else None
 
     def extract_sections(self, markdown_content: str, prompt_template: str,
                         missing_sections: Optional[List[str]] = None) -> Optional[Dict[str, str]]:
@@ -189,16 +274,12 @@ class LLMHelper:
         # 调用 LLM（启用 JSON 模式，以提高解析成功率）
         json_mode = True
 
-        # 根据请求的章节数量动态调整 max_tokens
-        # 如果只请求少数章节，使用较大的 max_tokens 以避免截断
+        # 根据请求的章节数量动态调整 max_tokens；DeepSeek-chat 上限 8192，统一 clamp 到 8000
+        # 避免超过上限触发 400 Bad Request。若章节确实很多被截断，下一版再考虑分批调用。
         if missing_sections and len(missing_sections) == 1:
-            max_tokens = 8000  # 单个章节可能很长，给足空间
-        elif missing_sections and len(missing_sections) <= 3:
-            max_tokens = 10000  # 2-3 个章节用 10000 tokens
-        elif missing_sections and len(missing_sections) <= 5:
-            max_tokens = 12000  # 4-5 个章节用 12000 tokens
+            max_tokens = 8000  # 单个章节给足空间
         else:
-            max_tokens = 16000  # 全部章节用 16000 tokens
+            max_tokens = 8000  # 多章节/全部：仍锁在 8000（DeepSeek 硬上限）
 
         response = self.call_llm(full_prompt, max_tokens=max_tokens, temperature=0.1, json_mode=json_mode)
 
@@ -270,12 +351,16 @@ class LLMHelper:
                 except Exception as fix_err:
                     print(f"    ❌ 修复失败: {str(fix_err)}")
 
-            # 尝试使用更宽松的解析方法
+            # 尝试宽松 JSON 解析（替换单引号为双引号等常见 LLM 输出问题）
             try:
                 print(f"    🔄 尝试使用宽松模式解析...")
-                # 使用 ast.literal_eval（更宽松）
-                import ast
-                sections = ast.literal_eval(response)
+                cleaned = response.strip()
+                # LLM 有时输出 Python dict 格式（单引号），转为 JSON 双引号
+                cleaned = cleaned.replace("'", '"')
+                # 移除可能的尾部逗号（JSON 不允许）
+                cleaned = re.sub(r',\s*}', '}', cleaned)
+                cleaned = re.sub(r',\s*]', ']', cleaned)
+                sections = json.loads(cleaned)
                 print(f"    ✅ 宽松模式解析成功")
                 return sections
             except Exception as e2:
@@ -1066,4 +1151,3 @@ def save_sections(sections: Dict[str, str], output_dir: Path) -> List[str]:
         saved_files.append(str(output_file))
 
     return saved_files
-
