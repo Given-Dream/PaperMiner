@@ -1,5 +1,13 @@
 # PaperMiner 更新日志
 
+## v1.4.3 (2026-08-21)
+
+- 修复 `PaperMiner.exe` 通过 `pythonw.exe` 无控制台启动时，MinerU 导入 `doclayout_yolo` 报错 `'NoneType' object has no attribute 'encoding'` 的问题。
+- 在导入 MinerU 前为缺失的 `sys.stdout` / `sys.stderr` 补建完整 UTF-8 文本流，兼容第三方 logging 初始化。
+- 保持主程序无 PowerShell、无控制台窗口的启动体验；GUI 与 UTF-8 文件日志不受影响。
+
+---
+
 ## v1.4.2 (2026-08-21)
 
 - 修复依赖安装已成功且退出码为 0，但跨盘 Conda 环境被最终运行时检查误报为失败的问题。

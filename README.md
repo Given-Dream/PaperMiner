@@ -7,9 +7,9 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.2** · [下载 PaperMiner v1.4.2](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.2)
+当前版本：**v1.4.3** · [下载 PaperMiner v1.4.3](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.3)
 
-![PaperMiner v1.4.2 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
+![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
 ## 适合做什么
 
@@ -26,7 +26,12 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
 
-## v1.4.2 更新内容
+## v1.4.3 更新内容
+
+- 修复无控制台启动时 MinerU 导入 `doclayout_yolo` 报错 `'NoneType' object has no attribute 'encoding'` 的问题。
+- `pythonw.exe` 模式现在会在 MinerU 导入前补建有效的 UTF-8 标准输出流，同时继续保持无 PowerShell、无控制台窗口。
+
+### v1.4.2 安装修复
 
 - 修复 Conda 主程序与 `MinerU` 环境位于不同磁盘或不同 `envs_dirs` 时，依赖安装成功却被误报失败的问题。
 - 安装器通过 `conda env list --json` 获取真实环境路径，并把精确的 Python 路径写入运行时配置。
@@ -52,8 +57,8 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.2 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.2)。
-2. 下载 `PaperMiner-v1.4.2-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验文件。
+1. 打开 [v1.4.3 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.3)。
+2. 下载 `PaperMiner-v1.4.3-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验文件。
 3. 双击安装包并选择安装目录。默认目录为：
 
    ```text
@@ -114,7 +119,7 @@ LLM 是可选项。不开启时，PaperMiner 仍会使用规则识别论文结�
 4. 测试通过后点击“保存并启用自定义接口”。
 5. 最后点击设置窗口右下角“应用并保存”。
 
-![PaperMiner v1.4.2 单选模型列表](docs/images/paperminer-v1.4.2-model-selector.png)
+![PaperMiner 单选模型列表](docs/images/paperminer-v1.4.2-model-selector.png)
 
 模型列表是**单选**：任何时刻只有一个模型会被测试、保存并用于主界面。`bge-*`、`nomic-embed-*` 等通常属于嵌入模型，可能不支持 `/chat/completions`；章节提取应选择 Qwen、DeepSeek、Llama 等可对话模型，并以“测试当前模型”的结果为准。
 

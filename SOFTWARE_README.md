@@ -1,4 +1,4 @@
-# PaperMiner 1.4.2 软件版
+# PaperMiner 1.4.3 软件版
 
 ## 发布与安装
 
@@ -17,6 +17,7 @@ Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 通过 `conda
 `PaperMiner.exe` 直接通过 `pythonw.exe` 启动 `scripts\batch_pdf_processor_gui.py`，主界面就是原“运行程序”打开的 GUI。
 
 - 正常启动不调用 PowerShell、`run.bat` 或 `运行程序.bat`，不会出现外部命令窗口。
+- v1.4.3 会在无控制台启动时补建 UTF-8 标准输出流，兼容 MinerU 的 `doclayout_yolo` 日志初始化。
 - 不检查后自动安装，也不把安装和运行串联起来。
 - 启动环境、Python 路径、模型源、处理进度和异常统一显示在软件主界面的日志区。
 - 主界面采用配置 / 任务 / 实时日志三栏横向看板，分隔线可拖动；窄屏仍保留常驻日志。

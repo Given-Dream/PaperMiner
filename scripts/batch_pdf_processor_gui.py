@@ -58,7 +58,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.2"
+    __version__ = "1.4.3"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -92,11 +92,35 @@ except ImportError:
         merge_all_sections_to_markdown as merge_sections_to_markdown_files,
     )
 
-# 设置标准输出编码为 UTF-8
-if sys.platform == 'win32' and sys.stdout is not None and hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-if sys.platform == 'win32' and sys.stderr is not None and hasattr(sys.stderr, 'buffer'):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+# 设置标准输出编码为 UTF-8。
+# pythonw.exe 没有控制台，sys.stdout / sys.stderr 会是 None；doclayout_yolo
+# 在导入时会直接读取 sys.stdout.encoding，因此必须在导入 MinerU 之前补建
+# 一个完整的文本流。os.devnull 返回的 TextIOWrapper 同时支持 encoding、
+# write、flush、fileno 和 reconfigure，能兼容 logging 及第三方模型库。
+def _prepare_standard_stream(stream_name: str):
+    stream = getattr(sys, stream_name, None)
+    if stream is None or getattr(stream, "encoding", None) is None:
+        stream = open(os.devnull, "w", encoding="utf-8", errors="replace")
+        setattr(sys, stream_name, stream)
+        return stream
+
+    if sys.platform == "win32" and stream.encoding.lower().replace("-", "") != "utf8":
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            if hasattr(stream, "buffer"):
+                stream = io.TextIOWrapper(
+                    stream.buffer,
+                    encoding="utf-8",
+                    errors="replace",
+                    line_buffering=True,
+                )
+                setattr(sys, stream_name, stream)
+    return stream
+
+
+_prepare_standard_stream("stdout")
+_prepare_standard_stream("stderr")
 
 
 # ---- LaTeX 数学片段 -> Unicode 纯文本（用于表格单元 / caption）----
@@ -4404,7 +4428,7 @@ def main():
         messagebox.showerror(
             'PaperMiner 缺少界面依赖',
             '未检测到 ttkbootstrap。\n\n'
-            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.2 依赖。\n\n'
+            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.3 依赖。\n\n'
             f'详细信息：{_TTKBOOTSTRAP_IMPORT_ERROR}',
             parent=root,
         )
