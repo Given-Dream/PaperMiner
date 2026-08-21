@@ -1,0 +1,366 @@
+Set-StrictMode -Version 2.0
+
+function Add-PaperMinerCandidate {
+    param(
+        [System.Collections.Generic.List[string]]$List,
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath(
+            [Environment]::ExpandEnvironmentVariables($Path))
+    }
+    catch {
+        return
+    }
+
+    foreach ($existing in $List) {
+        if ([string]::Equals(
+                $existing,
+                $fullPath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+
+    $List.Add($fullPath)
+}
+
+function Get-PaperMinerRuntimeConfig {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $configPath = Join-Path $ProjectRoot '.paperminer-runtime.json'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-PaperMinerCondaRoots {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $candidates = New-Object 'System.Collections.Generic.List[string]'
+    $config = Get-PaperMinerRuntimeConfig -ProjectRoot $ProjectRoot
+
+    if ($null -ne $config -and $config.PSObject.Properties['CondaRoot']) {
+        Add-PaperMinerCandidate -List $candidates -Path ([string]$config.CondaRoot)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+        $prefix = $env:CONDA_PREFIX
+        if ((Split-Path -Leaf $prefix) -ieq 'MinerU') {
+            $prefix = Split-Path -Parent (Split-Path -Parent $prefix)
+        }
+        Add-PaperMinerCandidate -List $candidates -Path $prefix
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:CONDA_EXE)) {
+        $condaExeDirectory = Split-Path -Parent $env:CONDA_EXE
+        if ((Split-Path -Leaf $condaExeDirectory) -ieq 'Scripts') {
+            Add-PaperMinerCandidate -List $candidates -Path (Split-Path -Parent $condaExeDirectory)
+        }
+    }
+
+    foreach ($commandName in @('conda.exe', 'conda.bat')) {
+        $command = Get-Command $commandName -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $command) {
+            $commandDirectory = Split-Path -Parent $command.Source
+            if ((Split-Path -Leaf $commandDirectory) -in @('Scripts', 'condabin')) {
+                Add-PaperMinerCandidate -List $candidates -Path (Split-Path -Parent $commandDirectory)
+            }
+        }
+    }
+
+    foreach ($path in @(
+            (Join-Path $env:USERPROFILE 'miniconda3'),
+            (Join-Path $env:USERPROFILE 'anaconda3'),
+            (Join-Path $env:LOCALAPPDATA 'miniconda3'),
+            (Join-Path $env:LOCALAPPDATA 'anaconda3'),
+            (Join-Path $env:ProgramData 'miniconda3'),
+            (Join-Path $env:ProgramData 'anaconda3'))) {
+        Add-PaperMinerCandidate -List $candidates -Path $path
+    }
+
+    $userNames = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in @($env:USERNAME, 'admin')) {
+        if (-not [string]::IsNullOrWhiteSpace($name) -and
+            -not $userNames.Contains($name)) {
+            $userNames.Add($name)
+        }
+    }
+
+    foreach ($drive in Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue) {
+        foreach ($distribution in @('miniconda3', 'anaconda3')) {
+            Add-PaperMinerCandidate -List $candidates -Path (Join-Path $drive.Root $distribution)
+            foreach ($name in $userNames) {
+                Add-PaperMinerCandidate -List $candidates -Path (
+                    Join-Path $drive.Root (Join-Path 'soft' (Join-Path $name $distribution)))
+            }
+        }
+    }
+
+    return $candidates
+}
+
+function Find-PaperMinerConda {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    foreach ($root in Get-PaperMinerCondaRoots -ProjectRoot $ProjectRoot) {
+        $condaBat = Join-Path $root 'condabin\conda.bat'
+        $condaExe = Join-Path $root 'Scripts\conda.exe'
+        if (Test-Path -LiteralPath $condaBat -PathType Leaf) {
+            return [pscustomobject]@{ Root = $root; Command = $condaBat }
+        }
+        if (Test-Path -LiteralPath $condaExe -PathType Leaf) {
+            return [pscustomobject]@{ Root = $root; Command = $condaExe }
+        }
+    }
+
+    return $null
+}
+
+function Get-PaperMinerCondaEnvironmentPaths {
+    param([Parameter(Mandatory = $true)][string]$CondaCommand)
+
+    $environments = New-Object 'System.Collections.Generic.List[string]'
+    if (-not (Test-Path -LiteralPath $CondaCommand -PathType Leaf)) {
+        return $environments
+    }
+
+    try {
+        $rawOutput = @(& $CondaCommand env list --json 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            return $environments
+        }
+
+        $jsonText = ($rawOutput -join [Environment]::NewLine).Trim()
+        $jsonStart = $jsonText.IndexOf('{')
+        $jsonEnd = $jsonText.LastIndexOf('}')
+        if ($jsonStart -lt 0 -or $jsonEnd -lt $jsonStart) {
+            return $environments
+        }
+
+        $payload = $jsonText.Substring(
+            $jsonStart,
+            $jsonEnd - $jsonStart + 1) | ConvertFrom-Json
+        if ($null -eq $payload -or
+            -not $payload.PSObject.Properties['envs']) {
+            return $environments
+        }
+
+        foreach ($environment in @($payload.envs)) {
+            Add-PaperMinerCandidate -List $environments -Path ([string]$environment)
+        }
+    }
+    catch {
+        return $environments
+    }
+
+    return $environments
+}
+
+function Test-PaperMinerCondaEnvironmentRegistration {
+    param(
+        [Parameter(Mandatory = $true)][string]$CondaCommand,
+        [Parameter(Mandatory = $true)][string]$EnvironmentPath
+    )
+
+    try {
+        $expected = [System.IO.Path]::GetFullPath($EnvironmentPath).TrimEnd('\')
+    }
+    catch {
+        return $false
+    }
+
+    foreach ($registered in Get-PaperMinerCondaEnvironmentPaths -CondaCommand $CondaCommand) {
+        if ([string]::Equals(
+                $expected,
+                ([System.IO.Path]::GetFullPath($registered).TrimEnd('\')),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Find-PaperMinerRuntime {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $config = Get-PaperMinerRuntimeConfig -ProjectRoot $ProjectRoot
+    if ($null -ne $config -and $config.PSObject.Properties['PythonExe']) {
+        $configuredPython = [string]$config.PythonExe
+        if (Test-Path -LiteralPath $configuredPython -PathType Leaf) {
+            $environmentPath = Split-Path -Parent $configuredPython
+            $condaRoot = $null
+            if ($config.PSObject.Properties['CondaRoot']) {
+                $condaRoot = [string]$config.CondaRoot
+            }
+            return [pscustomobject]@{
+                PythonExe = $configuredPython
+                EnvironmentPath = $environmentPath
+                CondaRoot = $condaRoot
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX) -and
+        (Split-Path -Leaf $env:CONDA_PREFIX) -ieq 'MinerU') {
+        $activePython = Join-Path $env:CONDA_PREFIX 'python.exe'
+        if (Test-Path -LiteralPath $activePython -PathType Leaf) {
+            return [pscustomobject]@{
+                PythonExe = $activePython
+                EnvironmentPath = $env:CONDA_PREFIX
+                CondaRoot = Split-Path -Parent (Split-Path -Parent $env:CONDA_PREFIX)
+            }
+        }
+    }
+
+    $conda = Find-PaperMinerConda -ProjectRoot $ProjectRoot
+    if ($null -ne $conda) {
+        foreach ($environmentPath in Get-PaperMinerCondaEnvironmentPaths `
+                -CondaCommand $conda.Command) {
+            if ((Split-Path -Leaf $environmentPath) -ine 'MinerU') {
+                continue
+            }
+
+            $registeredPython = Join-Path $environmentPath 'python.exe'
+            if (Test-Path -LiteralPath $registeredPython -PathType Leaf) {
+                return [pscustomobject]@{
+                    PythonExe = $registeredPython
+                    EnvironmentPath = $environmentPath
+                    CondaRoot = $conda.Root
+                }
+            }
+        }
+    }
+
+    foreach ($root in Get-PaperMinerCondaRoots -ProjectRoot $ProjectRoot) {
+        $python = Join-Path $root 'envs\MinerU\python.exe'
+        if (Test-Path -LiteralPath $python -PathType Leaf) {
+            return [pscustomobject]@{
+                PythonExe = $python
+                EnvironmentPath = Split-Path -Parent $python
+                CondaRoot = $root
+            }
+        }
+    }
+
+    return $null
+}
+
+function Save-PaperMinerRuntimeConfig {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$Runtime
+    )
+
+    $configPath = Join-Path $ProjectRoot '.paperminer-runtime.json'
+    $payload = [ordered]@{
+        SchemaVersion = 1
+        EnvironmentName = 'MinerU'
+        PythonExe = [string]$Runtime.PythonExe
+        EnvironmentPath = [string]$Runtime.EnvironmentPath
+        CondaRoot = [string]$Runtime.CondaRoot
+        UpdatedAt = (Get-Date).ToString('o')
+    }
+
+    $payload | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
+    return $configPath
+}
+
+function Initialize-PaperMinerProcessPump {
+    if ('PaperMinerProcessPump' -as [type]) {
+        return
+    }
+
+    $source = @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+
+public static class PaperMinerProcessPump
+{
+    public static int Run(string executable, string arguments, string workingDirectory, string logPath)
+    {
+        object gate = new object();
+        UTF8Encoding utf8 = new UTF8Encoding(false);
+
+        using (StreamWriter writer = new StreamWriter(logPath, true, utf8))
+        using (Process process = new Process())
+        {
+            writer.AutoFlush = true;
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = executable;
+            info.Arguments = arguments;
+            info.WorkingDirectory = workingDirectory;
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = utf8;
+            info.StandardErrorEncoding = utf8;
+            process.StartInfo = info;
+
+            DataReceivedEventHandler writeLine = delegate(object sender, DataReceivedEventArgs eventArgs)
+            {
+                if (eventArgs.Data == null)
+                {
+                    return;
+                }
+
+                lock (gate)
+                {
+                    Console.WriteLine(eventArgs.Data);
+                    writer.WriteLine(eventArgs.Data);
+                }
+            };
+
+            process.OutputDataReceived += writeLine;
+            process.ErrorDataReceived += writeLine;
+            if (!process.Start())
+            {
+                throw new InvalidOperationException("The child process did not start.");
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
+            process.WaitForExit();
+            return process.ExitCode;
+        }
+    }
+}
+'@
+
+    Add-Type -TypeDefinition $source -Language CSharp
+}
+
+function Invoke-PaperMinerProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    Initialize-PaperMinerProcessPump
+    return [PaperMinerProcessPump]::Run(
+        $FileName,
+        $Arguments,
+        $WorkingDirectory,
+        $LogPath)
+}

@@ -58,7 +58,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.1"
+    __version__ = "1.4.2"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -4404,7 +4404,7 @@ def main():
         messagebox.showerror(
             'PaperMiner 缺少界面依赖',
             '未检测到 ttkbootstrap。\n\n'
-            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.1 依赖。\n\n'
+            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.2 依赖。\n\n'
             f'详细信息：{_TTKBOOTSTRAP_IMPORT_ERROR}',
             parent=root,
         )

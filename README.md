@@ -7,9 +7,9 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.1** · [下载 PaperMiner v1.4.1](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.1)
+当前版本：**v1.4.2** · [下载 PaperMiner v1.4.2](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.2)
 
-![PaperMiner v1.4.1 横向工作台](docs/images/paperminer-v1.4.1-dashboard.png)
+![PaperMiner v1.4.2 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
 ## 适合做什么
 
@@ -26,7 +26,14 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
 
-## v1.4.1 更新内容
+## v1.4.2 更新内容
+
+- 修复 Conda 主程序与 `MinerU` 环境位于不同磁盘或不同 `envs_dirs` 时，依赖安装成功却被误报失败的问题。
+- 安装器通过 `conda env list --json` 获取真实环境路径，并把精确的 Python 路径写入运行时配置。
+- 重装和卸载按 Conda 已注册的精确 `MinerU` 前缀操作，不再假设环境固定在 `<Conda根>\envs\MinerU`。
+- 明确支持安装到 C、D、E、F 等任意可写目录；为防止误覆盖，仍禁止直接选择磁盘根目录。
+
+### v1.4.1 界面更新
 
 - 主界面升级为“处理配置 / 任务看板 / 实时日志”三栏横向布局，分隔线可以拖动。
 - PowerShell 输出已收进软件右侧实时日志区；正常启动 `PaperMiner.exe` 不再弹出外部 PowerShell 窗口。
@@ -45,8 +52,8 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.1 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.1)。
-2. 下载 `PaperMiner-v1.4.1-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验文件。
+1. 打开 [v1.4.2 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.2)。
+2. 下载 `PaperMiner-v1.4.2-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验文件。
 3. 双击安装包并选择安装目录。默认目录为：
 
    ```text
@@ -55,6 +62,8 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 4. 安装阶段会打开日志窗口，检查 Conda、安装或修复依赖，并记录可用的 MinerU 运行环境。首次安装还可能下载 PyTorch 和 MinerU 模型，需要较长时间与数 GB 磁盘空间。
 5. 安装完成后，从桌面快捷方式或安装目录中的 `PaperMiner.exe` 启动。
+
+安装目录可以选择 `D:\PaperMiner`、`E:\Apps\PaperMiner` 等非 C 盘位置，但不能直接选择 `D:\` 这类磁盘根目录。Conda 与 `MinerU` 环境也可以分处不同磁盘。
 
 > PowerShell 只在安装、重装和卸载阶段使用。正常运行 PaperMiner 时，日志直接显示在软件界面中，并同步写入 `logs\PaperMiner_*.log`。
 
@@ -105,7 +114,7 @@ LLM 是可选项。不开启时，PaperMiner 仍会使用规则识别论文结�
 4. 测试通过后点击“保存并启用自定义接口”。
 5. 最后点击设置窗口右下角“应用并保存”。
 
-![PaperMiner v1.4.1 单选模型列表](docs/images/paperminer-v1.4.1-model-selector.png)
+![PaperMiner v1.4.2 单选模型列表](docs/images/paperminer-v1.4.2-model-selector.png)
 
 模型列表是**单选**：任何时刻只有一个模型会被测试、保存并用于主界面。`bge-*`、`nomic-embed-*` 等通常属于嵌入模型，可能不支持 `/chat/completions`；章节提取应选择 Qwen、DeepSeek、Llama 等可对话模型，并以“测试当前模型”的结果为准。
 
