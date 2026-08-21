@@ -1,5 +1,15 @@
 # PaperMiner 更新日志
 
+## v1.4.4 (2026-08-21)
+
+- 将“合并同名章节到 Markdown”扩展为“合并同名章节和图表到 Markdown”。
+- 图表内容统一读取各论文 `Word` 文件夹下的 Markdown，并生成 `MergedSections/图表汇总_合并.md`。
+- 合并图表时自动把 `../Figure/...`、`../Tables/...` 等链接改写为相对于汇总文件的有效路径。
+- 支持图题包含 `[49]` 等嵌套方括号，以及论文目录名包含空格的情况。
+- 保留原有同名章节输出文件和 LaTeX 原文，不要求所有论文都同时具有章节与图表。
+
+---
+
 ## v1.4.3 (2026-08-21)
 
 - 修复 `PaperMiner.exe` 通过 `pythonw.exe` 无控制台启动时，MinerU 导入 `doclayout_yolo` 报错 `'NoneType' object has no attribute 'encoding'` 的问题。

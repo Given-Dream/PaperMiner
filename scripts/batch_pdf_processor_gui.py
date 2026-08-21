@@ -58,7 +58,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.3"
+    __version__ = "1.4.4"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -85,11 +85,11 @@ except ImportError as exc:
 
 try:
     from section_merger import (
-        merge_all_sections_to_markdown as merge_sections_to_markdown_files,
+        merge_all_sections_and_charts_to_markdown as merge_sections_and_charts_to_markdown_files,
     )
 except ImportError:
     from scripts.section_merger import (
-        merge_all_sections_to_markdown as merge_sections_to_markdown_files,
+        merge_all_sections_and_charts_to_markdown as merge_sections_and_charts_to_markdown_files,
     )
 
 # 设置标准输出编码为 UTF-8。
@@ -899,8 +899,8 @@ class BatchPDFProcessorGUI:
         ).grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(4, 0))
         ttk.Button(
             output_frame,
-            text='合并同名章节到 Markdown',
-            command=self.merge_all_sections_to_markdown,
+            text='合并同名章节和图表到 Markdown',
+            command=self.merge_all_sections_and_charts_to_markdown,
             bootstyle='info',
         ).grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(8, 0))
 
@@ -1357,8 +1357,8 @@ class BatchPDFProcessorGUI:
 
         ttk.Button(
             output_frame,
-            text="合并同名章节到 Markdown",
-            command=self.merge_all_sections_to_markdown,
+            text="合并同名章节和图表到 Markdown",
+            command=self.merge_all_sections_and_charts_to_markdown,
         ).grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(8, 0))
 
         # 底部信息
@@ -1415,29 +1415,40 @@ class BatchPDFProcessorGUI:
         except OSError as exc:
             self.log(f"⚠️  无法保存当前 LLM 模型: {exc}")
 
-    def merge_all_sections_to_markdown(self):
-        """按小节名称合并不同文章的 Markdown，并保留 LaTeX 原文。"""
+    def merge_all_sections_and_charts_to_markdown(self):
+        """合并同名章节及各论文 Word 文件夹中的图表 Markdown。"""
         target = self.extract_output_path / "MergedSections"
         try:
-            outputs, total_articles, section_count = merge_sections_to_markdown_files(
-                self.extract_output_path, target
+            (
+                outputs,
+                total_section_articles,
+                section_count,
+                chart_count,
+            ) = merge_sections_and_charts_to_markdown_files(
+                self.extract_output_path,
+                target,
             )
         except ValueError as exc:
-            messagebox.showinfo("没有可合并章节", str(exc))
+            messagebox.showinfo("没有可合并内容", str(exc))
             return
         except Exception as exc:
             self.log(f"❌ 合并 Markdown 失败: {exc}")
             messagebox.showerror("合并失败", str(exc))
             return
-
+        self.log(f"✅ 已生成 {len(outputs)} 个合并 Markdown")
         self.log(
-            f"✅ 已生成 {section_count} 个合并 Markdown，累计写入 {total_articles} 篇文章章节"
+            f"  - 同名章节：{section_count} 类，累计写入 {total_section_articles} 篇文章章节"
         )
+        self.log(f"  - 图表汇总：合并 {chart_count} 个 Word 文件夹 Markdown")
         for output in outputs:
             self.log(f"  - {output}")
         messagebox.showinfo(
             "合并完成",
-            f"已生成 {section_count} 个 Markdown 文件。\n输出目录：{target}",
+            (
+                f"已生成 {len(outputs)} 个 Markdown 文件。\n"
+                f"同名章节：{section_count} 类；图表来源：{chart_count} 个。\n"
+                f"输出目录：{target}"
+            ),
         )
 
     def check_input_folder(self):
@@ -4428,7 +4439,7 @@ def main():
         messagebox.showerror(
             'PaperMiner 缺少界面依赖',
             '未检测到 ttkbootstrap。\n\n'
-            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.3 依赖。\n\n'
+            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.4 依赖。\n\n'
             f'详细信息：{_TTKBOOTSTRAP_IMPORT_ERROR}',
             parent=root,
         )
