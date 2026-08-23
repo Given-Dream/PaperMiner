@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.4** · [下载 PaperMiner v1.4.4](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.4)
+当前版本：**v1.4.5** · [下载 PaperMiner v1.4.5](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.5)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -26,7 +26,16 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
 
-## v1.4.4 更新内容
+## v1.4.5 更新内容
+
+- 输入 PDF 目录和输出根目录均可在主界面选择，不再要求把论文复制到安装目录。
+- 路径选择会保存在 `%LOCALAPPDATA%\PaperMiner\settings.json`，更新软件后仍然有效。
+- 批处理日志和界面状态改由 Tk 主线程统一更新，消除后台线程直接操作 Tk 的不稳定路径。
+- 每篇论文结束后回收 Python/CUDA 临时内存，并把内存变化写入日志；原生崩溃时也会尽可能记录线程堆栈。
+- MinerU 改为逐篇隔离运行：CUDA/原生推理库即使硬崩溃，也不会使 PaperMiner 主界面和整批队列一起退出，日志会记录 Windows 退出码。
+- 安装器会验证并升级旧版 MinerU；支持范围为 `>=3.1.0,<4.0`，不会再把 2.6.4 误判为已完成安装。
+
+### v1.4.4 图表合并更新
 
 - “合并同名章节到 Markdown”扩展为“合并同名章节和图表到 Markdown”。
 - 同名章节继续分别生成汇总文件；每篇论文 `Word` 文件夹下的图表 Markdown 会合并为 `图表汇总_合并.md`。
@@ -63,8 +72,8 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.4 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.4)。
-2. 下载 `PaperMiner-v1.4.4-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验文件。
+1. 打开 [v1.4.5 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.5)。
+2. 下载 `PaperMiner-v1.4.5-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
 3. 双击安装包并选择安装目录。默认目录为：
 
    ```text
@@ -80,19 +89,20 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 3. 处理 PDF
 
-1. 把 PDF 放入软件显示的 `input` 目录。
-2. 点击“刷新文件”，选择完整流程或仅提取已有 raw 结果。
-3. 勾选需要的文字、公式、图片、表格和章节功能。
-4. 点击“开始处理”，在右侧查看实时日志和任务统计。
-5. 从“打开 raw”或“打开 extract”进入输出目录。
+1. 在“输入文件”区域点击“选择目录”，选择存放 PDF 的文件夹。
+2. 在“输出操作”区域点击“选择输出”，指定结果根目录；软件会在其中建立 `raw` 和 `extract`。
+3. 点击“刷新文件”，选择完整流程或仅提取已有 raw 结果。
+4. 勾选需要的文字、公式、图片、表格和章节功能。
+5. 点击“开始处理”，在右侧查看实时日志和任务统计。
+6. 从“打开 raw”或“打开 extract”进入输出目录。
 
 ## 界面与工作流
 
 ```text
 PDF
  └─ MinerU 解析
-     ├─ output/raw       原始 Markdown、图片、布局与模型结果
-     └─ output/extract   正文、图片、表格、公式、章节和 Word 汇总
+     ├─ <所选输出目录>/raw       原始 Markdown、图片、布局与模型结果
+     └─ <所选输出目录>/extract   正文、图片、表格、公式、章节和 Word 汇总
 ```
 
 主界面提供两种处理模式：

@@ -134,6 +134,8 @@ set "PYTHONNOUSERSITE=1"
 echo Checking existing installation...
 "%PYTHON_EXE%" -m pip show mineru torch pandas ttkbootstrap >nul 2>nul
 if not !errorlevel!==0 goto :install_deps
+"%PYTHON_EXE%" -c "import importlib.metadata as m,re; p=[int(x) for x in re.findall(r'\d+',m.version('mineru'))[:2]]; raise SystemExit(0 if tuple(p)>=(3,1) and tuple(p)<(4,0) else 1)" >nul 2>nul
+if not !errorlevel!==0 goto :install_deps
 "%PYTHON_EXE%" -c "import importlib.metadata as m; v=tuple(int(x) for x in m.version('ttkbootstrap').split('.')[:3]); raise SystemExit(0 if (2,2,2) <= v < (3,0,0) else 1)" >nul 2>nul
 if not !errorlevel!==0 goto :install_deps
 
@@ -335,13 +337,17 @@ if "!HAS_GPU!"=="1" (
 :: ----------------------------------------
 :install_mineru
 echo.
-"%PYTHON_EXE%" -m pip show mineru >nul 2>nul
+"%PYTHON_EXE%" -c "import importlib.metadata as m,re; p=[int(x) for x in re.findall(r'\d+',m.version('mineru'))[:2]]; raise SystemExit(0 if tuple(p)>=(3,1) and tuple(p)<(4,0) else 1)" >nul 2>nul
 if !errorlevel!==0 (
-    echo [Step 3] MinerU already installed, skipping.
+    echo [Step 3] Compatible MinerU already installed, skipping.
     goto :install_other
 )
 
-echo [Step 3] Installing MinerU (>=3.1.0)...
+echo [Step 3] Installing or upgrading MinerU (>=3.1.0,<4.0)...
+"%PYTHON_EXE%" -m pip show mineru >nul 2>nul
+if !errorlevel!==0 (
+    echo   Unsupported installed MinerU version detected. Upgrade is required.
+)
 %PIP_CMD% install -U "mineru[core]>=3.1.0,<4.0"
 if errorlevel 1 (
     echo [WARNING] MinerU install may have issues. Continue anyway...

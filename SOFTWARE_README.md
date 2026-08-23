@@ -1,4 +1,4 @@
-# PaperMiner 1.4.4 软件版
+# PaperMiner 1.4.5 软件版
 
 ## 发布与安装
 
@@ -24,6 +24,10 @@ Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 通过 `conda
 - 主界面采用配置 / 任务 / 实时日志三栏横向看板，分隔线可拖动；窄屏仍保留常驻日志。
 - 界面由 `ttkbootstrap 2.x` 渲染；Setup 内置 2.2.2 wheel，并会自动安装或升级该依赖。
 - 同样的日志按 UTF-8 写入 `logs\PaperMiner_*.log`，避免中文乱码。
+- 输入和输出目录可在主界面分别选择；路径保存在 `%LOCALAPPDATA%\PaperMiner\settings.json`，升级后仍然有效。
+- 长批次每篇结束后会回收 Python/CUDA 临时内存并记录占用变化；原生崩溃堆栈也会尽可能写入同一日志文件。
+- MinerU 对每篇 PDF 使用独立进程；单篇发生 CUDA/原生库硬崩溃时，主界面会记录退出码并保留其余批处理队列。
+- 安装和启动时均验证 MinerU 必须为 `>=3.1.0,<4.0`；已存在的 2.x 环境会由重装流程升级，不再直接跳过。
 - PowerShell 仅用于 Setup、重装和卸载阶段。
 
 ## 重装与卸载

@@ -22,7 +22,8 @@ class LLMHelper:
     def __init__(self, model_name: Optional[str] = None,
                  provider: Optional[str] = None,
                  env_path: Optional[Path] = None,
-                 require_api: bool = True):
+                 require_api: bool = True,
+                 debug_dir: Optional[Path] = None):
         """
         初始化 LLM Helper
 
@@ -33,6 +34,8 @@ class LLMHelper:
             env_path: 可选的 .env 路径，主要用于测试。
             require_api: 是否在配置缺失时立即报错。GUI 的正则回退流程会设为
                 False，使未配置 API 时仍可完成纯正则章节提取。
+            debug_dir: LLM 响应无法解析时的诊断输出目录。为空时兼容旧版，
+                使用当前工作目录下的 output/debug。
         """
         settings = load_llm_settings(env_path)
         requested_model = (model_name or "").strip()
@@ -42,6 +45,7 @@ class LLMHelper:
             requested_model = ""
 
         self.provider = (provider or settings.provider).strip().lower()
+        self.debug_dir = Path(debug_dir) if debug_dir is not None else Path("output") / "debug"
         self.configuration_error = ""
         if self.provider == "deepseek":
             self.api_key = settings.deepseek_api_key
@@ -322,9 +326,8 @@ class LLMHelper:
             # 将完整响应保存到调试文件，方便排查问题
             try:
                 from pathlib import Path
-                debug_dir = Path("output") / "debug"
-                debug_dir.mkdir(parents=True, exist_ok=True)
-                debug_file = debug_dir / "llm_section_response.json"
+                self.debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_file = self.debug_dir / "llm_section_response.json"
                 debug_file.write_text(response, encoding="utf-8")
                 print(f"    📝 已保存完整 LLM 响应到: {debug_file}")
             except Exception as save_err:

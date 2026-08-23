@@ -11,7 +11,7 @@ PaperMiner - 智能论文内容提取工具
 """
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 try:
     import ttkbootstrap as ttk
@@ -28,6 +28,8 @@ import io
 import time
 import os
 import atexit
+import faulthandler
+import gc
 import traceback
 from pathlib import Path
 import json
@@ -58,7 +60,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.4"
+    __version__ = "1.4.5"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -399,19 +401,32 @@ class BatchPDFProcessorGUI:
             f"{self.initial_width}x{self.initial_height}+{window_x}+{window_y}"
         )
 
-        # 设置基础路径
+        # 安装目录只保存程序文件；输入/输出目录由用户配置决定并持久化到
+        # %LOCALAPPDATA%\PaperMiner\settings.json，升级或改装程序时不会丢失。
         self.base_path = Path(__file__).parent.parent
+        local_app_data = Path(
+            os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        )
+        self.user_config_path = local_app_data / "PaperMiner" / "settings.json"
         self.input_path = self.base_path / "input"
         self.output_path = self.base_path / "output"
         self.raw_output_path = self.output_path / "raw"
         self.extract_output_path = self.output_path / "extract"
+        self._load_directory_preferences()
 
         # 正常运行由 PaperMiner.exe 直接启动 pythonw.exe，不再依赖外部
         # PowerShell 窗口。所有应用日志同时进入 GUI 和 UTF-8 日志文件。
         self._log_lock = threading.Lock()
         self._log_handle = None
         self.log_file_path = None
+        self._fault_handler_enabled = False
         self._initialize_file_logging()
+
+        # Tk 只能由主线程操作。后台处理和 loguru 回调只向此队列投递任务，
+        # 主线程定时消费，避免长批次中的跨线程 Tcl 调用导致随机退出。
+        self._ui_queue = queue.Queue()
+        self._closing = False
+        self._active_run_options = {}
 
         # 每次启动都从 .env 读取接口、已启用模型和当前模型。
         self.llm_settings = (
@@ -426,6 +441,7 @@ class BatchPDFProcessorGUI:
         self.failed_count = 0
         self.skipped_count = 0
         self.last_mineru_issue_code = None
+        self._mineru_process = None
         # 颜色由 ttkbootstrap 主题接管；这些值同时供原生 Text/Toplevel 使用。
         self.bg_color = '#F4F7FB'
         self.card_bg = '#FFFFFF'
@@ -442,6 +458,8 @@ class BatchPDFProcessorGUI:
 
         self.create_widgets()
         self._install_exception_hooks()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(50, self._drain_ui_queue)
         self.log(f"{__app_name__} v{__version__} 已启动")
         if _PAPERMINER_DIRECT_LAUNCH:
             self.log("启动方式: PaperMiner.exe -> pythonw.exe (无 PowerShell)")
@@ -464,6 +482,177 @@ class BatchPDFProcessorGUI:
 
         # 首次运行环境检测（延迟执行，避免阻塞 UI 启动）
         self.root.after(500, self.check_environment)
+
+    def _load_directory_preferences(self):
+        """读取用户选择的输入/输出目录；损坏配置自动回退到安装目录默认值。"""
+        try:
+            if not self.user_config_path.exists():
+                return
+            payload = json.loads(self.user_config_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+
+            input_value = str(payload.get("input_directory", "")).strip()
+            output_value = str(payload.get("output_directory", "")).strip()
+            if input_value:
+                candidate = Path(os.path.expandvars(input_value)).expanduser()
+                if candidate.is_absolute():
+                    self.input_path = candidate
+            if output_value:
+                candidate = Path(os.path.expandvars(output_value)).expanduser()
+                if candidate.is_absolute():
+                    self.output_path = candidate
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            _STARTUP_MESSAGES.append(f"警告: 目录配置读取失败，已使用默认目录: {exc}")
+        finally:
+            self._update_output_paths()
+
+    def _update_output_paths(self):
+        """由输出根目录统一派生 raw 与 extract，避免不同功能各自硬编码。"""
+        self.raw_output_path = self.output_path / "raw"
+        self.extract_output_path = self.output_path / "extract"
+
+    def _save_directory_preferences(self):
+        """原子保存路径设置，避免异常退出留下半个 JSON 文件。"""
+        try:
+            self.user_config_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": 1,
+                "input_directory": str(self.input_path),
+                "output_directory": str(self.output_path),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            temp_path = self.user_config_path.with_suffix(".json.tmp")
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temp_path.replace(self.user_config_path)
+        except OSError as exc:
+            self.log(f"[WARN] 无法保存目录配置: {exc}")
+
+    def _refresh_directory_labels(self):
+        if hasattr(self, "input_path_label"):
+            self.input_path_label.config(text=str(self.input_path))
+        if hasattr(self, "output_path_label"):
+            self.output_path_label.config(text=str(self.output_path))
+
+    def choose_input_directory(self):
+        """选择 PDF 输入目录并立即刷新文件清单。"""
+        if self.is_processing:
+            messagebox.showwarning("任务进行中", "请先停止或等待当前任务结束，再更改输入目录。")
+            return
+        selected = filedialog.askdirectory(
+            title="选择 PDF 输入目录",
+            initialdir=str(self.input_path if self.input_path.exists() else self.base_path),
+            mustexist=True,
+            parent=self.root,
+        )
+        if not selected:
+            return
+        self.input_path = Path(selected)
+        self._save_directory_preferences()
+        self._refresh_directory_labels()
+        self.log(f"输入目录已更改: {self.input_path}")
+        self.check_input_folder()
+
+    def choose_output_directory(self):
+        """选择输出根目录；raw 与 extract 始终位于该目录下。"""
+        if self.is_processing:
+            messagebox.showwarning("任务进行中", "请先停止或等待当前任务结束，再更改输出目录。")
+            return
+        selected = filedialog.askdirectory(
+            title="选择输出根目录",
+            initialdir=str(self.output_path if self.output_path.exists() else self.base_path),
+            mustexist=True,
+            parent=self.root,
+        )
+        if not selected:
+            return
+        candidate = Path(selected)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            (candidate / "raw").mkdir(parents=True, exist_ok=True)
+            (candidate / "extract").mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("目录不可用", f"无法写入所选输出目录：\n{candidate}\n\n{exc}")
+            return
+
+        self.output_path = candidate
+        self._update_output_paths()
+        self._save_directory_preferences()
+        self._refresh_directory_labels()
+        self.log(f"输出目录已更改: {self.output_path}")
+
+    def _post_ui(self, callback, *args, **kwargs):
+        """线程安全地把 UI 操作投递给 Tk 主线程。"""
+        if not self._closing:
+            self._ui_queue.put((callback, args, kwargs))
+
+    def _drain_ui_queue(self):
+        """由 Tk 主线程消费日志和状态更新，单轮限量避免界面被日志淹没。"""
+        if self._closing:
+            return
+        for _ in range(250):
+            try:
+                callback, args, kwargs = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(*args, **kwargs)
+            except tk.TclError:
+                if self._closing:
+                    return
+            except Exception as exc:
+                # 单个状态控件更新失败不能终止整个 UI 消费循环。
+                self.log(f"[ERROR] 界面状态更新失败: {exc}")
+        try:
+            self.root.after(50, self._drain_ui_queue)
+        except tk.TclError:
+            self._closing = True
+
+    def _capture_run_options(self):
+        """在主线程一次性读取 Tk 变量，后台线程只使用普通 Python 值。"""
+        self._active_run_options = {
+            "extract_text": bool(self.extract_text_var.get()),
+            "extract_formula": bool(self.extract_formula_var.get()),
+            "extract_figures": bool(self.extract_figures_var.get()),
+            "extract_tables": bool(self.extract_tables_var.get()),
+            "extract_sections": bool(self.extract_sections_var.get()),
+            "use_gpu": bool(self.use_gpu_var.get()),
+            "skip_processed": bool(self.skip_processed_var.get()),
+            "backend": self.backend_var.get(),
+            "llm_model": self.llm_model_var.get(),
+            "llm_provider": self.llm_settings.provider if self.llm_settings else "deepseek",
+        }
+
+    def _run_option(self, name, default=None):
+        return self._active_run_options.get(name, default)
+
+    def _on_close(self):
+        if self.is_processing and not messagebox.askyesno(
+            "任务仍在运行",
+            "当前 PDF 可能仍在 MinerU 中处理。强制关闭会中断本篇输出，确认退出吗？",
+            parent=self.root,
+        ):
+            return
+        self.is_processing = False
+        self._terminate_active_mineru()
+        self._closing = True
+        self._close_log_file()
+        self.root.destroy()
+
+    def _terminate_active_mineru(self):
+        """终止当前隔离进程；仅由用户点击停止或确认关闭时调用。"""
+        process = self._mineru_process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                self.log("已向当前 MinerU 隔离进程发送停止请求。")
+        except (OSError, ProcessLookupError) as exc:
+            self.log(f"停止 MinerU 隔离进程时出现提示: {exc}")
 
     def setup_styles(self):
         """配置 PaperMiner v1.4.x 的 ttkbootstrap 主题与少量品牌样式。"""
@@ -626,29 +815,39 @@ class BatchPDFProcessorGUI:
             config_board, text='输入文件', padding=12, bootstyle='primary'
         )
         info_frame.grid(row=0, column=0, pady=(0, 9), sticky=(tk.W, tk.E))
-        info_frame.grid_columnconfigure(0, weight=1)
+        for column in range(3):
+            info_frame.grid_columnconfigure(column, weight=1)
         self.file_count_label = ttk.Label(
             info_frame, text='PDF 文件数量: 0', style='SectionTitle.TLabel'
         )
-        self.file_count_label.grid(row=0, column=0, columnspan=2, sticky=tk.W)
-        ttk.Label(
+        self.file_count_label.grid(row=0, column=0, columnspan=3, sticky=tk.W)
+        self.input_path_label = ttk.Label(
             info_frame,
             text=str(self.input_path),
             style='Muted.TLabel',
             wraplength=410,
-        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(3, 9))
+        )
+        self.input_path_label.grid(
+            row=1, column=0, columnspan=3, sticky=tk.W, pady=(3, 9)
+        )
         ttk.Button(
             info_frame,
             text='刷新文件',
             command=self.check_input_folder,
             bootstyle='secondary outline',
-        ).grid(row=2, column=0, sticky=(tk.W, tk.E), padx=(0, 4))
+        ).grid(row=2, column=0, sticky=(tk.W, tk.E), padx=(0, 3))
         ttk.Button(
             info_frame,
-            text='打开 input',
-            command=lambda: self.open_folder(self.input_path),
+            text='选择目录',
+            command=self.choose_input_directory,
             bootstyle='primary',
-        ).grid(row=2, column=1, sticky=(tk.W, tk.E), padx=(4, 0))
+        ).grid(row=2, column=1, sticky=(tk.W, tk.E), padx=3)
+        ttk.Button(
+            info_frame,
+            text='打开目录',
+            command=lambda: self.open_folder(self.input_path),
+            bootstyle='secondary outline',
+        ).grid(row=2, column=2, sticky=(tk.W, tk.E), padx=(3, 0))
 
         options_frame = ttk.Labelframe(
             config_board, text='处理配置', padding=12, bootstyle='primary'
@@ -877,32 +1076,41 @@ class BatchPDFProcessorGUI:
             task_board, text='输出操作', padding=12, bootstyle='secondary'
         )
         output_frame.grid(row=2, column=0, sticky=(tk.W, tk.E))
-        output_frame.grid_columnconfigure(0, weight=1)
-        output_frame.grid_columnconfigure(1, weight=1)
-        ttk.Label(
+        for column in range(3):
+            output_frame.grid_columnconfigure(column, weight=1)
+        self.output_path_label = ttk.Label(
             output_frame,
             text=str(self.output_path),
             style='Muted.TLabel',
             wraplength=240,
-        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+        )
+        self.output_path_label.grid(
+            row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8)
+        )
+        ttk.Button(
+            output_frame,
+            text='选择输出',
+            command=self.choose_output_directory,
+            bootstyle='primary',
+        ).grid(row=1, column=0, sticky=(tk.W, tk.E), padx=(0, 3))
         ttk.Button(
             output_frame,
             text='打开 raw',
             command=lambda: self.open_folder(self.raw_output_path),
             bootstyle='secondary outline',
-        ).grid(row=1, column=0, sticky=(tk.W, tk.E), padx=(0, 4))
+        ).grid(row=1, column=1, sticky=(tk.W, tk.E), padx=3)
         ttk.Button(
             output_frame,
             text='打开 extract',
             command=lambda: self.open_folder(self.extract_output_path),
             bootstyle='secondary outline',
-        ).grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(4, 0))
+        ).grid(row=1, column=2, sticky=(tk.W, tk.E), padx=(3, 0))
         ttk.Button(
             output_frame,
             text='合并同名章节和图表到 Markdown',
             command=self.merge_all_sections_and_charts_to_markdown,
             bootstyle='info',
-        ).grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(8, 0))
+        ).grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(8, 0))
 
         # 右栏：常驻日志，不再依赖外部 PowerShell 窗口。
         log_frame = ttk.Labelframe(
@@ -1452,14 +1660,21 @@ class BatchPDFProcessorGUI:
         )
 
     def check_input_folder(self):
-        """检查 input 文件夹中的 PDF 文件"""
-        if not self.input_path.exists():
-            self.input_path.mkdir(parents=True, exist_ok=True)
+        """检查用户选择的输入目录中的 PDF 文件。"""
+        try:
+            if not self.input_path.exists():
+                self.input_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
             self.file_count_label.config(text="PDF 文件数量: 0")
-            self.log("⚠️  input 文件夹为空，请添加 PDF 文件")
+            self.log(f"[ERROR] 无法访问输入目录 {self.input_path}: {exc}")
             return
 
-        pdf_files = list(self.input_path.glob("*.pdf"))
+        try:
+            pdf_files = sorted(self.input_path.glob("*.pdf"), key=lambda p: p.name.lower())
+        except OSError as exc:
+            self.file_count_label.config(text="PDF 文件数量: 0")
+            self.log(f"[ERROR] 无法读取输入目录 {self.input_path}: {exc}")
+            return
         count = len(pdf_files)
         self.file_count_label.config(text=f"PDF 文件数量: {count}")
 
@@ -1468,7 +1683,7 @@ class BatchPDFProcessorGUI:
             for pdf in pdf_files:
                 self.log(f"  - {pdf.name}")
         else:
-            self.log("⚠️  input 文件夹为空，请添加 PDF 文件")
+            self.log(f"⚠️  输入目录中没有 PDF 文件: {self.input_path}")
 
     LOG_MAX_LINES = 1000
     # Tkinter on Windows cannot reliably render color Emoji in every font.
@@ -1504,7 +1719,7 @@ class BatchPDFProcessorGUI:
                     self._log_handle.flush()
             except (OSError, ValueError):
                 pass
-        self.root.after(0, self._append_log, message)
+        self._post_ui(self._append_log, message)
 
     def _initialize_file_logging(self):
         """为本次 GUI 会话创建独立日志文件。"""
@@ -1516,6 +1731,11 @@ class BatchPDFProcessorGUI:
             self._log_handle = self.log_file_path.open(
                 "a", encoding="utf-8", buffering=1
             )
+            try:
+                faulthandler.enable(file=self._log_handle, all_threads=True)
+                self._fault_handler_enabled = True
+            except (OSError, RuntimeError, ValueError):
+                self._fault_handler_enabled = False
             atexit.register(self._close_log_file)
         except OSError as exc:
             self.log_file_path = None
@@ -1527,6 +1747,12 @@ class BatchPDFProcessorGUI:
         if handle is None:
             return
         try:
+            if self._fault_handler_enabled:
+                try:
+                    faulthandler.disable()
+                except RuntimeError:
+                    pass
+                self._fault_handler_enabled = False
             with self._log_lock:
                 handle.flush()
                 handle.close()
@@ -1630,11 +1856,12 @@ class BatchPDFProcessorGUI:
 
         if mode == "full":
             # 完整处理模式：需要 PDF 文件
-            pdf_files = list(self.input_path.glob("*.pdf"))
+            pdf_files = sorted(self.input_path.glob("*.pdf"), key=lambda p: p.name.lower())
             if not pdf_files:
                 messagebox.showwarning(
                     "没有文件",
-                    "input 文件夹中没有 PDF 文件！\n\n请先添加 PDF 文件。"
+                    f"所选输入目录中没有 PDF 文件：\n{self.input_path}\n\n"
+                    "请添加文件或重新选择输入目录。"
                 )
                 return
 
@@ -1745,6 +1972,7 @@ class BatchPDFProcessorGUI:
             items_to_process = raw_folders
 
         # 更新界面状态
+        self._capture_run_options()
         self.is_processing = True
         self.start_button.config(state='disabled')
         self.stop_button.config(state='normal')
@@ -1764,19 +1992,22 @@ class BatchPDFProcessorGUI:
             threading.Thread(
                 target=self.process_pdfs,
                 args=(items_to_process,),
-                daemon=True
+                daemon=True,
+                name="PaperMiner-PDF-Batch",
             ).start()
         else:
             threading.Thread(
                 target=self.extract_from_raw,
                 args=(items_to_process,),
-                daemon=True
+                daemon=True,
+                name="PaperMiner-Raw-Extract",
             ).start()
 
     def stop_processing(self):
         """停止处理"""
         self.is_processing = False
         self.log("\n⚠️  用户请求停止处理...")
+        self._terminate_active_mineru()
 
     def process_pdfs(self, pdf_files: List[Path]):
         """处理所有 PDF 文件"""
@@ -1803,13 +2034,13 @@ class BatchPDFProcessorGUI:
                     break
 
                 self.current_pdf_index = i + 1
-                self.root.after(0, self.update_progress)
+                self._post_ui(self.update_progress)
 
                 # 检查是否跳过已处理的文件
-                if self.skip_processed_var.get() and self.is_already_processed(pdf_file.stem):
+                if self._run_option("skip_processed", True) and self.is_already_processed(pdf_file.stem):
                     self.skipped_count += 1
                     self.log(f"\n⏭ 跳过已处理: {pdf_file.name}")
-                    self.root.after(0, lambda: self.update_stats())
+                    self._post_ui(self.update_stats)
                     continue
 
                 self.log("\n" + "=" * 60)
@@ -1835,12 +2066,17 @@ class BatchPDFProcessorGUI:
                         "model_snapshot_missing",
                         "hf_network_error",
                         "mineru_config_missing",
+                        "mineru_missing",
+                        "unsupported_mineru_version",
+                        "mineru_worker_missing",
                     }:
                         self.log("⚠️  检测到环境级错误，停止后续文件处理。请先修复环境后重试。")
+                        self._release_batch_memory(pdf_file.name)
                         break
 
                 # 更新统计显示
-                self.root.after(0, lambda: self.update_stats())
+                self._post_ui(self.update_stats)
+                self._release_batch_memory(pdf_file.name)
 
             # 处理完成
             self.log("\n" + "=" * 60)
@@ -1852,13 +2088,13 @@ class BatchPDFProcessorGUI:
                 self.log(f"跳过: {self.skipped_count} 个")
             self.log(f"总计: {len(pdf_files)} 个")
 
-            self.root.after(0, lambda: self.processing_complete())
+            self._post_ui(self.processing_complete)
 
         except Exception as e:
             self.log(f"\n❌ 处理过程中发生错误: {str(e)}")
             import traceback
             self.log(traceback.format_exc())
-            self.root.after(0, lambda: self.processing_complete())
+            self._post_ui(self.processing_complete)
 
     def update_progress(self):
         """更新进度。status_label 承载"状态 · X / Y"总进度；progress_text 留给
@@ -1876,6 +2112,98 @@ class BatchPDFProcessorGUI:
         self.success_label.config(text=str(self.success_count))
         self.failed_label.config(text=str(self.failed_count))
         self.skipped_label.config(text=str(self.skipped_count))
+
+    @staticmethod
+    def _process_memory_snapshot():
+        """返回当前进程的工作集/私有内存（MiB）；诊断失败时返回 None。"""
+        if sys.platform != "win32":
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class ProcessMemoryCountersEx(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                ]
+
+            counters = ProcessMemoryCountersEx()
+            counters.cb = ctypes.sizeof(counters)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            get_process_memory_info = psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(ProcessMemoryCountersEx),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            ok = get_process_memory_info(
+                kernel32.GetCurrentProcess(),
+                ctypes.byref(counters),
+                counters.cb,
+            )
+            if not ok:
+                return None
+            divisor = 1024 * 1024
+            return {
+                "working_set": counters.WorkingSetSize / divisor,
+                "private": counters.PrivateUsage / divisor,
+            }
+        except Exception:
+            return None
+
+    def _release_batch_memory(self, context: str):
+        """每篇结束后释放临时对象和 CUDA 缓存，并记录内存变化。"""
+        before = self._process_memory_snapshot()
+        gpu_before = None
+        gpu_after = None
+        # 先打破/回收 Python 引用，再让 CUDA caching allocator 归还空闲块；
+        # 顺序反过来会遗漏刚刚由 gc 释放的 tensor。
+        collected = gc.collect()
+        try:
+            torch_module = sys.modules.get("torch")
+            if torch_module is not None and torch_module.cuda.is_available():
+                gpu_before = (
+                    torch_module.cuda.memory_allocated() / (1024 * 1024),
+                    torch_module.cuda.memory_reserved() / (1024 * 1024),
+                )
+                torch_module.cuda.empty_cache()
+                if hasattr(torch_module.cuda, "ipc_collect"):
+                    torch_module.cuda.ipc_collect()
+                gpu_after = (
+                    torch_module.cuda.memory_allocated() / (1024 * 1024),
+                    torch_module.cuda.memory_reserved() / (1024 * 1024),
+                )
+        except Exception as exc:
+            self.log(f"[WARN] CUDA 缓存清理失败（不影响后续处理）: {exc}")
+
+        after = self._process_memory_snapshot()
+        parts = [f"内存回收 [{context}]: Python 对象 {collected}"]
+        if before and after:
+            parts.append(
+                "工作集 "
+                f"{before['working_set']:.0f}->{after['working_set']:.0f} MiB，"
+                f"私有内存 {before['private']:.0f}->{after['private']:.0f} MiB"
+            )
+        if gpu_before and gpu_after:
+            parts.append(
+                "GPU 已分配/保留 "
+                f"{gpu_before[0]:.0f}/{gpu_before[1]:.0f}"
+                f"->{gpu_after[0]:.0f}/{gpu_after[1]:.0f} MiB"
+            )
+        self.log("；".join(parts))
 
     def check_gpu_status(self):
         """检查 GPU 状态"""
@@ -1902,7 +2230,8 @@ class BatchPDFProcessorGUI:
 
                 if cuda_check.returncode != 0:
                     self.log("⚠️  CUDA 不可用，将使用 CPU 模式")
-                    self.use_gpu_var.set(False)
+                    self._active_run_options["use_gpu"] = False
+                    self._post_ui(self.use_gpu_var.set, False)
                 else:
                     self.log("✅ GPU 加速已启用")
             else:
@@ -1916,91 +2245,118 @@ class BatchPDFProcessorGUI:
             self.log("")
 
     def run_mineru(self, pdf_file: Path) -> 'Path | None':
-        """进程内调 mineru.cli.common.do_parse 处理 PDF。成功返回 raw_dir，失败返回 None。
+        """在隔离子进程中调用 MinerU，成功返回 raw_dir，失败返回 None。
 
-        相比旧的 subprocess CLI 模式：
-        - 不依赖 mineru CLI 参数稳定性（3.x 已移除 -d/--device 等 flag）
-        - 不经过 3.x 的 orchestrated FastAPI，无 502 健康探测超时风险
-        - 模型可在进程内驻留，批处理更快
-        - 已知回归：处理单个 PDF 期间无法强制取消（只能在 PDF 之间停止）
+        pipeline 会加载 CUDA、PyTorch、ONNX Runtime 等原生库。原生访问冲突或
+        资源耗尽不会产生可捕获的 Python 异常；若直接在 GUI 进程内调用，整个
+        PaperMiner 会无 traceback 地退出。每篇 PDF 使用独立进程，既保住主界面
+        与日志，也确保 Windows 在每篇结束后回收全部进程级 CPU/GPU 资源。
         """
-        sink_id = None
         output_tail: List[str] = []
+        process = None
         try:
             self.last_mineru_issue_code = None
-            self.log("步骤 1: 使用 MinerU 处理 PDF (进程内)...")
+            self.log("步骤 1: 使用 MinerU 处理 PDF (稳定隔离进程)...")
 
-            device = "cuda" if self.use_gpu_var.get() else "cpu"
-            backend = self.backend_var.get()
-
-            # 3.x 已移除对应 CLI flag，必须在 import mineru 之前通过环境变量注入
-            os.environ["MINERU_DEVICE_MODE"] = device
-            os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
-
-            try:
-                from mineru.cli.common import do_parse, read_fn
-                import mineru
-            except ImportError as e:
-                self.log(f"❌ 无法导入 mineru 模块: {e}")
-                self.log("  请检查 conda 环境或重跑'一键安装.bat'")
+            device = "cuda" if self._run_option("use_gpu", True) else "cpu"
+            backend = self._run_option("backend", "pipeline")
+            model_source = os.environ.get("MINERU_MODEL_SOURCE", "modelscope")
+            worker_script = Path(__file__).resolve().with_name("mineru_worker.py")
+            if not worker_script.is_file():
+                self.last_mineru_issue_code = "mineru_worker_missing"
+                self.log(f"❌ MinerU 隔离组件缺失: {worker_script}")
+                self.log("  请从 PaperMiner 安装程序执行重装。")
                 return None
 
-            # 运行期自检：若 mineru 版本异常低（<2.5），多半是旧包遗留，提前告警。
-            mineru_file = Path(mineru.__file__).resolve()
-            mineru_version = getattr(getattr(mineru, "version", None), "__version__", "unknown")
-            try:
-                ver_tuple = tuple(int(x) for x in mineru_version.split(".")[:2])
-                if ver_tuple < (2, 5):
-                    self.log(f"⚠️  检测到 mineru 版本较旧 ({mineru_version})，建议升级:")
-                    self.log('    pip install -U "mineru[core]>=3.1.0,<4.0"')
-            except Exception:
-                pass
-            self.log(f"mineru: {mineru_version}  路径: {mineru_file.parent}")
-            self.log(f"参数: device={device}, backend={backend}, model_source={os.environ['MINERU_MODEL_SOURCE']}")
-            self.log(f"输入: {pdf_file.name}")
-            self.log(f"输出: {self.raw_output_path}")
-            self.log("正在处理，请稍候...")
-            self.log("")
+            runtime_python = Path(sys.executable).resolve()
+            if runtime_python.name.lower() == "pythonw.exe":
+                console_python = runtime_python.with_name("python.exe")
+                if console_python.is_file():
+                    runtime_python = console_python
 
-            # 把 mineru 的 loguru 日志桥接到 GUI log 面板
-            from loguru import logger as mineru_logger
-
-            info_keywords = (
-                "processing", "page", "complete", "completed", "progress",
-                "layout", "ocr", "model", "cuda", "gpu", "batch",
-                "analysis", "analyze", "download", "loaded", "init",
+            command = (
+                str(runtime_python),
+                "-u",
+                str(worker_script),
+                "--input",
+                str(pdf_file),
+                "--output",
+                str(self.raw_output_path),
+                "--device",
+                device,
+                "--backend",
+                backend,
+                "--model-source",
+                model_source,
             )
+            worker_env = os.environ.copy()
+            worker_env["MINERU_DEVICE_MODE"] = device
+            worker_env["MINERU_MODEL_SOURCE"] = model_source
+            worker_env["PYTHONIOENCODING"] = "utf-8"
+            worker_env["PYTHONFAULTHANDLER"] = "1"
+            worker_env["PYTHONNOUSERSITE"] = "1"
 
-            def _sink(message):
-                record = message.record
-                time_str = record["time"].strftime("%H:%M:%S")
-                level = record["level"].name
-                msg = record["message"]
-                line = f"{time_str} | {level} | {msg}"
-                output_tail.append(line)
-                if len(output_tail) > 500:
-                    output_tail.pop(0)
-                level_lo = level.lower()
-                if level_lo in ("warning", "error", "critical"):
-                    self.log(f"  {line}")
-                elif level_lo == "info" and any(k in msg.lower() for k in info_keywords):
-                    self.log(f"  {line}")
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-            sink_id = mineru_logger.add(_sink, level="INFO")
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=worker_env,
+                creationflags=creation_flags,
+            )
+            self._mineru_process = process
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    line = raw_line.rstrip("\r\n")
+                    output_tail.append(line)
+                    self.log(f"  {line}" if line else "")
+                    if len(output_tail) > 500:
+                        output_tail.pop(0)
+
+            exit_code = process.wait()
+            self._mineru_process = None
+            if exit_code != 0:
+                unsigned_code = exit_code & 0xFFFFFFFF
+                code_text = f"{exit_code} (0x{unsigned_code:08X})"
+                self.log("")
+                self.log(f"❌ MinerU 隔离进程异常退出，代码: {code_text}")
+
+                if exit_code == 11:
+                    self.last_mineru_issue_code = "mineru_missing"
+                elif exit_code == 12:
+                    self.last_mineru_issue_code = "unsupported_mineru_version"
+                elif unsigned_code >= 0x80000000:
+                    self.last_mineru_issue_code = "mineru_native_crash"
+                    native_hints = {
+                        0xC0000005: "原生访问冲突（常见于 CUDA/显卡驱动/原生推理库）",
+                        0xC0000017: "系统无法分配所需内存",
+                        0xC000009A: "系统资源不足",
+                        0xC00000FD: "原生线程堆栈溢出",
+                        0xC0000374: "原生堆损坏",
+                        0xC0000409: "原生库快速失败/安全检查失败",
+                    }
+                    hint = native_hints.get(
+                        unsigned_code,
+                        "CUDA/PyTorch/ONNX 等原生组件异常",
+                    )
+                    self.log(f"  判定: {hint}")
+                    self.log("  主程序已被隔离保护；该文献记为失败，其余队列可继续。")
+                else:
+                    self.last_mineru_issue_code = "mineru_worker_failed"
+
+                diagnosis = self.diagnose_mineru_output(output_tail)
+                if diagnosis:
+                    self.log_mineru_diagnosis(diagnosis, output_tail)
+                return None
 
             pdf_name = pdf_file.stem
-            pdf_bytes = read_fn(pdf_file)
-            do_parse(
-                output_dir=str(self.raw_output_path),
-                pdf_file_names=[pdf_name],
-                pdf_bytes_list=[pdf_bytes],
-                p_lang_list=["ch"],
-                backend=backend,
-                parse_method="auto",
-                formula_enable=True,
-                table_enable=True,
-            )
-
             self.log("")
             self.log("✓ MinerU 处理完成")
             raw_dir = self.find_raw_output_dir(pdf_name)
@@ -2016,7 +2372,6 @@ class BatchPDFProcessorGUI:
             return None
 
         except Exception as e:
-            import traceback
             self.log("")
             self.log(f"❌ MinerU 处理失败: {e}")
             tb = traceback.format_exc()
@@ -2029,11 +2384,11 @@ class BatchPDFProcessorGUI:
                 self.log_mineru_diagnosis(diagnosis, output_tail)
             return None
         finally:
-            if sink_id is not None:
+            self._mineru_process = None
+            if process is not None and process.stdout is not None:
                 try:
-                    from loguru import logger as _l
-                    _l.remove(sink_id)
-                except Exception:
+                    process.stdout.close()
+                except (OSError, ValueError):
                     pass
 
     def precheck_mineru_environment(self):
@@ -2256,13 +2611,13 @@ class BatchPDFProcessorGUI:
                 pdf_name = raw_folder.name
 
                 # 更新进度
-                self.root.after(0, lambda: self.update_progress())
+                self._post_ui(self.update_progress)
 
                 # 检查是否跳过已处理的文件
-                if self.skip_processed_var.get() and self.is_already_processed(pdf_name):
+                if self._run_option("skip_processed", True) and self.is_already_processed(pdf_name):
                     self.skipped_count += 1
                     self.log(f"⏭ 跳过已处理: {pdf_name}")
-                    self.root.after(0, lambda: self.update_stats())
+                    self._post_ui(self.update_stats)
                     continue
 
                 self.log("=" * 60)
@@ -2271,10 +2626,8 @@ class BatchPDFProcessorGUI:
 
                 # 更新进度：status_label 由 update_progress 写成 "处理中 · X/Y"，
                 # 文件名单独落在 progress_text（副行灰字），两者不再打架。
-                self.root.after(0, lambda: self.update_progress())
-                self.root.after(0, lambda name=pdf_name: self.progress_text.config(
-                    text=f"正在提取：{name}"
-                ))
+                self._post_ui(self.update_progress)
+                self._post_ui(self.progress_text.config, text=f"正在提取：{pdf_name}")
 
                 try:
                     # 提取内容（使用 PDF 名称作为参数）
@@ -2297,7 +2650,8 @@ class BatchPDFProcessorGUI:
                     self.log("")
 
                 # 更新统计显示
-                self.root.after(0, lambda: self.update_stats())
+                self._post_ui(self.update_stats)
+                self._release_batch_memory(pdf_name)
 
             # 处理完成
             self.log("=" * 60)
@@ -2309,11 +2663,11 @@ class BatchPDFProcessorGUI:
                 self.log(f"跳过: {self.skipped_count} 个")
             self.log(f"总计: {len(raw_folders)} 个")
 
-            self.root.after(0, lambda: self.processing_complete())
+            self._post_ui(self.processing_complete)
 
         except Exception as e:
             self.log(f"❌ 提取过程出错: {str(e)}")
-            self.root.after(0, lambda: self.processing_complete())
+            self._post_ui(self.processing_complete)
 
     def extract_and_organize(self, pdf_name: str, raw_dir: 'Path | None' = None) -> bool:
         """提取和整理处理结果到extract文件夹。返回 True 表示至少部分提取成功。"""
@@ -2342,31 +2696,31 @@ class BatchPDFProcessorGUI:
             any_success = False
 
             # 提取文字 (Markdown) - 保存到extract/pdf_name/pdf_name.md
-            if self.extract_text_var.get():
+            if self._run_option("extract_text", True):
                 if self.extract_text(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
                     any_success = True
 
             # 提取公式 - 保存到extract/pdf_name/Formula/
-            if self.extract_formula_var.get():
+            if self._run_option("extract_formula", True):
                 if self.extract_formulas(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
                     any_success = True
 
             # 提取图片 - 保存到extract/pdf_name/Figure/
-            if self.extract_figures_var.get():
+            if self._run_option("extract_figures", True):
                 if self.extract_figures(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
                     any_success = True
 
             # 提取表格 - 保存到extract/pdf_name/Tables/
-            if self.extract_tables_var.get():
+            if self._run_option("extract_tables", True):
                 if self.extract_tables(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
                     any_success = True
 
             # 先创建 Word 文件夹（不依赖 LLM），避免 LLM 长耗时或失败时丢失 Word/docx 产出
-            if self.extract_figures_var.get() or self.extract_tables_var.get():
+            if self._run_option("extract_figures", True) or self._run_option("extract_tables", True):
                 self.create_word_folder(raw_pdf_dir, extract_pdf_dir, actual_pdf_name)
 
             # 最后跑 LLM 章节提取（可能很慢，放最后即使超时/失败也不影响上面的产出）
-            if self.extract_sections_var.get():
+            if self._run_option("extract_sections", True):
                 self.extract_sections_with_llm(raw_pdf_dir, extract_pdf_dir, actual_pdf_name)
 
             if any_success:
@@ -2425,7 +2779,7 @@ class BatchPDFProcessorGUI:
             "处理完成",
             "批量处理完成！\n\n"
             + "\n".join(summary_parts)
-            + "\n\n结果已保存到 output/extract 文件夹"
+            + f"\n\n结果已保存到：\n{self.extract_output_path}"
         )
 
     def extract_text(self, raw_dir: Path, extract_dir: Path, pdf_name: str) -> bool:
@@ -3002,8 +3356,8 @@ class BatchPDFProcessorGUI:
             prompt_template = None
 
             # 初始化 LLM
-            model_name = self.llm_model_var.get()
-            provider = self.llm_settings.provider if self.llm_settings else "deepseek"
+            model_name = self._run_option("llm_model", "")
+            provider = self._run_option("llm_provider", "deepseek")
             provider_label = "DeepSeek" if provider == "deepseek" else "自定义接口"
             self.log(f"    使用接口: {provider_label}")
             self.log(f"    使用模型: {model_name}")
@@ -3014,6 +3368,7 @@ class BatchPDFProcessorGUI:
                     provider=provider,
                     env_path=self.base_path / ".env",
                     require_api=False,
+                    debug_dir=self.output_path / "debug",
                 )
             except ValueError as e:
                 self.log(f"    ❌ LLM 初始化失败: {str(e)}")
@@ -3551,13 +3906,25 @@ class BatchPDFProcessorGUI:
         """首次运行环境检测，检查核心依赖是否已安装"""
         issues = []
 
-        # 检查 MinerU 和 PyTorch（用 pip show 避免 DLL 加载问题）
-        for pkg_name, display_name in [("mineru", "MinerU (mineru[core])"), ("torch", "PyTorch")]:
-            try:
-                from importlib.metadata import distribution
-                distribution(pkg_name)
-            except Exception:
-                issues.append(f"{display_name} 未安装")
+        # 只读取发行版元数据，不在 GUI 启动阶段加载 CUDA DLL。
+        try:
+            from importlib.metadata import version as package_version
+
+            mineru_version = package_version("mineru")
+            mineru_parts = tuple(
+                int(part) for part in re.findall(r"\d+", mineru_version)[:3]
+            )
+            if not ((3, 1) <= mineru_parts < (4, 0)):
+                issues.append(
+                    f"MinerU {mineru_version} 不受支持（需要 >=3.1.0,<4.0；请执行重装）"
+                )
+        except Exception:
+            issues.append("MinerU (mineru[core]) 未安装")
+
+        try:
+            package_version("torch")
+        except Exception:
+            issues.append("PyTorch 未安装")
 
         # 检查核心依赖
         dep_checks = [
@@ -4176,11 +4543,12 @@ class BatchPDFProcessorGUI:
             except ValueError as exc:
                 set_status(str(exc), "#b42318")
                 return
+            api_key = custom_key_var.get().strip()
             set_status("正在读取 /models，请稍候……", "#b26a00")
 
             def runner():
                 try:
-                    models = discover_models(api_base, custom_key_var.get().strip())
+                    models = discover_models(api_base, api_key)
                     if not models:
                         raise ValueError("接口没有返回可用模型")
 
@@ -4192,20 +4560,25 @@ class BatchPDFProcessorGUI:
                             "#16823b",
                         )
 
-                    dialog.after(0, apply_models)
+                    self._post_ui(apply_models)
                 except Exception as exc:
                     error = str(exc)
-                    dialog.after(0, lambda: set_status(f"读取模型失败：{error}", "#b42318"))
+                    self._post_ui(
+                        set_status,
+                        f"读取模型失败：{error}",
+                        "#b42318",
+                    )
 
             threading.Thread(target=runner, daemon=True).start()
 
         def test_deepseek():
             provider_var.set("deepseek")
             model = deepseek_model_var.get().strip() or DEFAULT_DEEPSEEK_MODEL
+            api_key = deepseek_key_var.get().strip()
             run_in_background(
                 lambda: format_speed_result(test_model_speed(
                     DEEPSEEK_API_BASE,
-                    deepseek_key_var.get().strip(),
+                    api_key,
                     model,
                 )),
                 "测试完成；请点击“保存并启用 DeepSeek”。\n",
@@ -4439,7 +4812,7 @@ def main():
         messagebox.showerror(
             'PaperMiner 缺少界面依赖',
             '未检测到 ttkbootstrap。\n\n'
-            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.4 依赖。\n\n'
+            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.5 依赖。\n\n'
             f'详细信息：{_TTKBOOTSTRAP_IMPORT_ERROR}',
             parent=root,
         )

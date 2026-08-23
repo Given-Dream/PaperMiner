@@ -37,7 +37,14 @@ def main() -> int:
         problems.append("missing modules: " + ", ".join(missing))
 
     try:
-        importlib.metadata.version("mineru")
+        mineru_version = importlib.metadata.version("mineru")
+        parsed_version = version_tuple(mineru_version)
+        if not ((3, 1) <= parsed_version < (4, 0)):
+            problems.append(
+                "unsupported mineru version: "
+                + mineru_version
+                + " (required: >=3.1.0,<4.0)"
+            )
     except importlib.metadata.PackageNotFoundError:
         problems.append("missing distribution: mineru")
 
