@@ -60,7 +60,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.5"
+    __version__ = "1.4.8"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -87,11 +87,27 @@ except ImportError as exc:
 
 try:
     from section_merger import (
-        merge_all_sections_and_charts_to_markdown as merge_sections_and_charts_to_markdown_files,
+        merge_all_sections_charts_and_code_to_markdown as merge_sections_charts_and_code_files,
+    )
+    from open_source_extractor import (
+        AVAILABILITY_REPORT_FILENAME,
+        AVAILABILITY_SCAN_FILENAME,
+        availability_scan_completed,
+        extract_availability_links,
+        write_availability_report,
+        write_availability_scan_marker,
     )
 except ImportError:
     from scripts.section_merger import (
-        merge_all_sections_and_charts_to_markdown as merge_sections_and_charts_to_markdown_files,
+        merge_all_sections_charts_and_code_to_markdown as merge_sections_charts_and_code_files,
+    )
+    from scripts.open_source_extractor import (
+        AVAILABILITY_REPORT_FILENAME,
+        AVAILABILITY_SCAN_FILENAME,
+        availability_scan_completed,
+        extract_availability_links,
+        write_availability_report,
+        write_availability_scan_marker,
     )
 
 # 设置标准输出编码为 UTF-8。
@@ -387,6 +403,15 @@ def _render_pdf_region(pdf_path, page_idx, bbox_pt, dpi=200, pad_pt=4):
 
 
 class BatchPDFProcessorGUI:
+    FATAL_MINERU_ISSUES = {
+        "model_snapshot_missing",
+        "hf_network_error",
+        "mineru_config_missing",
+        "mineru_missing",
+        "unsupported_mineru_version",
+        "mineru_worker_missing",
+    }
+
     def __init__(self, root):
         self.root = root
         self.root.title(f"{__app_name__} v{__version__} - 智能论文内容提取工具")
@@ -412,6 +437,15 @@ class BatchPDFProcessorGUI:
         self.output_path = self.base_path / "output"
         self.raw_output_path = self.output_path / "raw"
         self.extract_output_path = self.output_path / "extract"
+        self.gpu_parallel_preferences = {
+            "selected_gpu_ids": [],
+            "tasks_per_gpu": {},
+        }
+        self.detected_gpus = []
+        self._gpu_detection_error = ""
+        self._gpu_detection_completed = False
+        self._gpu_detection_in_progress = False
+        self._gpu_detection_lock = threading.Lock()
         self._load_directory_preferences()
 
         # 正常运行由 PaperMiner.exe 直接启动 pythonw.exe，不再依赖外部
@@ -441,7 +475,12 @@ class BatchPDFProcessorGUI:
         self.failed_count = 0
         self.skipped_count = 0
         self.last_mineru_issue_code = None
+        self._mineru_issue_codes = {}
+        self._mineru_issue_lock = threading.Lock()
         self._mineru_process = None
+        self._active_mineru_processes = {}
+        self._mineru_process_lock = threading.RLock()
+        self._thread_log_context = threading.local()
         # 颜色由 ttkbootstrap 主题接管；这些值同时供原生 Text/Toplevel 使用。
         self.bg_color = '#F4F7FB'
         self.card_bg = '#FFFFFF'
@@ -482,9 +521,15 @@ class BatchPDFProcessorGUI:
 
         # 首次运行环境检测（延迟执行，避免阻塞 UI 启动）
         self.root.after(500, self.check_environment)
+        self.root.after(800, self._start_gpu_detection)
 
     def _load_directory_preferences(self):
         """读取用户选择的输入/输出目录；损坏配置自动回退到安装目录默认值。"""
+        if not hasattr(self, "gpu_parallel_preferences"):
+            self.gpu_parallel_preferences = {
+                "selected_gpu_ids": [],
+                "tasks_per_gpu": {},
+            }
         try:
             if not self.user_config_path.exists():
                 return
@@ -502,6 +547,34 @@ class BatchPDFProcessorGUI:
                 candidate = Path(os.path.expandvars(output_value)).expanduser()
                 if candidate.is_absolute():
                     self.output_path = candidate
+
+            gpu_parallel = payload.get("gpu_parallel", {})
+            if isinstance(gpu_parallel, dict):
+                selected_gpu_ids = []
+                for value in gpu_parallel.get("selected_gpu_ids", []):
+                    try:
+                        gpu_id = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if gpu_id >= 0 and gpu_id not in selected_gpu_ids:
+                        selected_gpu_ids.append(gpu_id)
+
+                tasks_per_gpu = {}
+                raw_tasks = gpu_parallel.get("tasks_per_gpu", {})
+                if isinstance(raw_tasks, dict):
+                    for key, value in raw_tasks.items():
+                        try:
+                            gpu_id = int(key)
+                            worker_count = max(1, min(4, int(value)))
+                        except (TypeError, ValueError):
+                            continue
+                        if gpu_id >= 0:
+                            tasks_per_gpu[gpu_id] = worker_count
+
+                self.gpu_parallel_preferences = {
+                    "selected_gpu_ids": selected_gpu_ids,
+                    "tasks_per_gpu": tasks_per_gpu,
+                }
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             _STARTUP_MESSAGES.append(f"警告: 目录配置读取失败，已使用默认目录: {exc}")
         finally:
@@ -515,11 +588,27 @@ class BatchPDFProcessorGUI:
     def _save_directory_preferences(self):
         """原子保存路径设置，避免异常退出留下半个 JSON 文件。"""
         try:
+            gpu_preferences = getattr(
+                self,
+                "gpu_parallel_preferences",
+                {"selected_gpu_ids": [], "tasks_per_gpu": {}},
+            )
             self.user_config_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "input_directory": str(self.input_path),
                 "output_directory": str(self.output_path),
+                "gpu_parallel": {
+                    "selected_gpu_ids": list(
+                        gpu_preferences.get("selected_gpu_ids", [])
+                    ),
+                    "tasks_per_gpu": {
+                        str(key): int(value)
+                        for key, value in gpu_preferences.get(
+                            "tasks_per_gpu", {}
+                        ).items()
+                    },
+                },
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
             temp_path = self.user_config_path.with_suffix(".json.tmp")
@@ -530,6 +619,405 @@ class BatchPDFProcessorGUI:
             temp_path.replace(self.user_config_path)
         except OSError as exc:
             self.log(f"[WARN] 无法保存目录配置: {exc}")
+
+    @staticmethod
+    def _runtime_console_python() -> Path:
+        """返回可输出诊断信息的 Python；安装版通常由 pythonw.exe 启动。"""
+        runtime_python = Path(sys.executable).resolve()
+        if runtime_python.name.lower() == "pythonw.exe":
+            console_python = runtime_python.with_name("python.exe")
+            if console_python.is_file():
+                return console_python
+        return runtime_python
+
+    def _detect_available_gpus(self, refresh: bool = False) -> List[dict]:
+        """在隔离进程中检测 PyTorch 实际可用的 CUDA 显卡。
+
+        GUI 进程不导入 torch，避免仅打开设置就把 CUDA DLL 和显存常驻到
+        PaperMiner 主进程。返回的 index 是传给 CUDA_VISIBLE_DEVICES 的物理序号。
+        """
+        if (
+            not refresh
+            and getattr(self, "_gpu_detection_completed", False)
+        ):
+            return [dict(item) for item in getattr(self, "detected_gpus", [])]
+
+        detection_lock = getattr(self, "_gpu_detection_lock", None)
+        if detection_lock is None:
+            detection_lock = threading.Lock()
+            self._gpu_detection_lock = detection_lock
+
+        with detection_lock:
+            if (
+                not refresh
+                and getattr(self, "_gpu_detection_completed", False)
+            ):
+                return [dict(item) for item in getattr(self, "detected_gpus", [])]
+
+            probe = (
+                "import json, torch\n"
+                "items = []\n"
+                "available = bool(torch.cuda.is_available())\n"
+                "count = int(torch.cuda.device_count()) if available else 0\n"
+                "for index in range(count):\n"
+                "    props = torch.cuda.get_device_properties(index)\n"
+                "    items.append({'index': index, 'name': props.name, "
+                "'memory_gb': round(props.total_memory / (1024 ** 3), 1)})\n"
+                "print('__PAPERMINER_GPU_JSON__' + json.dumps({"
+                "'torch_version': torch.__version__, 'cuda_available': available, "
+                "'gpus': items}, ensure_ascii=False))\n"
+            )
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            try:
+                probe_env = os.environ.copy()
+                # 检测本机全部物理卡，不继承外部工具遗留的可见卡过滤。
+                probe_env.pop("CUDA_VISIBLE_DEVICES", None)
+                result = subprocess.run(
+                    [str(self._runtime_console_python()), "-c", probe],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=45,
+                    env=probe_env,
+                    creationflags=creation_flags,
+                )
+                marker = "__PAPERMINER_GPU_JSON__"
+                payload = None
+                for line in reversed(result.stdout.splitlines()):
+                    if line.startswith(marker):
+                        payload = json.loads(line[len(marker):])
+                        break
+                if result.returncode != 0 or not isinstance(payload, dict):
+                    details = (result.stderr or result.stdout).strip().splitlines()
+                    tail = details[-1] if details else f"退出代码 {result.returncode}"
+                    raise RuntimeError(tail)
+
+                detected = []
+                for item in payload.get("gpus", []):
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        detected.append(
+                            {
+                                "index": int(item["index"]),
+                                "name": str(item["name"]),
+                                "memory_gb": float(item["memory_gb"]),
+                            }
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                self.detected_gpus = detected
+                self._detected_torch_version = str(payload.get("torch_version", "未知"))
+                self._gpu_detection_error = (
+                    "" if detected else "PyTorch 未检测到可用的 CUDA 显卡"
+                )
+            except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
+                self.detected_gpus = []
+                self._gpu_detection_error = str(exc)
+            finally:
+                self._gpu_detection_completed = True
+
+        return [dict(item) for item in self.detected_gpus]
+
+    def _resolve_gpu_assignments(self, refresh: bool = False) -> List[dict]:
+        """把已保存设置与本次实测显卡求交集，生成稳定的逐卡工作槽。"""
+        gpus = self._detect_available_gpus(refresh=refresh)
+        if not gpus:
+            return []
+
+        preferences = getattr(
+            self,
+            "gpu_parallel_preferences",
+            {"selected_gpu_ids": [], "tasks_per_gpu": {}},
+        )
+        selected = list(preferences.get("selected_gpu_ids", []))
+        available_ids = {item["index"] for item in gpus}
+        selected = [gpu_id for gpu_id in selected if gpu_id in available_ids]
+        if not selected:
+            selected = [item["index"] for item in gpus]
+
+        tasks_per_gpu = preferences.get("tasks_per_gpu", {})
+        assignments = []
+        for gpu in gpus:
+            gpu_id = gpu["index"]
+            if gpu_id not in selected:
+                continue
+            try:
+                workers = int(tasks_per_gpu.get(gpu_id, tasks_per_gpu.get(str(gpu_id), 1)))
+            except (TypeError, ValueError):
+                workers = 1
+            assignments.append({**gpu, "workers": max(1, min(4, workers))})
+        return assignments
+
+    @staticmethod
+    def _format_gpu_plan(assignments: List[dict]) -> str:
+        if not assignments:
+            return "CPU 模式"
+        parts = [
+            f"GPU {item['index']} × {item['workers']}"
+            for item in assignments
+        ]
+        total_workers = sum(item["workers"] for item in assignments)
+        return f"{' + '.join(parts)}（并发 {total_workers}）"
+
+    def _gpu_summary_text(self) -> str:
+        if not getattr(self, "_gpu_detection_completed", False):
+            return "GPU：正在自动检测…"
+        assignments = self._resolve_gpu_assignments()
+        if assignments:
+            return self._format_gpu_plan(assignments)
+        error = getattr(self, "_gpu_detection_error", "")
+        return f"GPU：不可用（{error}）" if error else "GPU：不可用"
+
+    def _refresh_gpu_summary_label(self):
+        label = getattr(self, "gpu_summary_label", None)
+        if label is not None:
+            label.config(text=self._gpu_summary_text())
+        button = getattr(self, "gpu_settings_button", None)
+        if button is not None:
+            mode_var = getattr(self, "process_mode_var", None)
+            extract_only = mode_var is not None and mode_var.get() == "extract_only"
+            enabled = (
+                getattr(self, "_gpu_detection_completed", False)
+                and not getattr(self, "_gpu_detection_in_progress", False)
+                and not getattr(self, "is_processing", False)
+                and not extract_only
+            )
+            button.config(state="normal" if enabled else "disabled")
+
+    def _start_gpu_detection(self, open_settings_after: bool = False):
+        """启动后后台检测显卡，避免 torch 冷启动阻塞主界面。"""
+        if getattr(self, "_gpu_detection_in_progress", False):
+            return
+        self._gpu_detection_in_progress = True
+        self._gpu_detection_completed = False
+        self._refresh_gpu_summary_label()
+
+        def detect():
+            try:
+                gpus = self._detect_available_gpus(refresh=True)
+                if gpus:
+                    summary = self._format_gpu_plan(self._resolve_gpu_assignments())
+                    self.log(f"GPU 自动检测完成: {len(gpus)} 张；{summary}")
+                else:
+                    self.log(
+                        f"GPU 自动检测: "
+                        f"{self._gpu_detection_error or '未发现 CUDA 显卡'}"
+                    )
+            finally:
+                self._gpu_detection_in_progress = False
+                self._post_ui(self._refresh_gpu_summary_label)
+                if open_settings_after and self.detected_gpus:
+                    self._post_ui(self.open_gpu_parallel_settings)
+
+        threading.Thread(
+            target=detect,
+            daemon=True,
+            name="PaperMiner-GPU-Detect",
+        ).start()
+
+    def open_gpu_parallel_settings(self, force_refresh: bool = False):
+        """配置启用的 GPU 以及每张卡并行运行的 MinerU 任务数。"""
+        if self.is_processing:
+            messagebox.showwarning(
+                "任务进行中",
+                "请先停止或等待当前批次完成，再修改 GPU 并行设置。",
+                parent=self.root,
+            )
+            return
+
+        if force_refresh:
+            self._start_gpu_detection(open_settings_after=True)
+            return
+        if (
+            getattr(self, "_gpu_detection_in_progress", False)
+            or not getattr(self, "_gpu_detection_completed", False)
+        ):
+            messagebox.showinfo(
+                "正在检测显卡",
+                "PaperMiner 正在后台加载 PyTorch 并检测显卡，请稍候。\n"
+                "检测期间仍可关闭 GPU 加速并使用 CPU 模式。",
+                parent=self.root,
+            )
+            return
+
+        gpus = self._detect_available_gpus()
+        if not gpus:
+            retry = messagebox.askretrycancel(
+                "未检测到 CUDA 显卡",
+                "当前 PyTorch 环境没有检测到可用显卡。\n\n"
+                f"诊断：{self._gpu_detection_error or '未知'}\n"
+                "仍可关闭主界面的“GPU 加速”，使用 CPU 模式。\n\n"
+                "是否重新检测？",
+                parent=self.root,
+            )
+            if retry:
+                self._start_gpu_detection(open_settings_after=True)
+            self._refresh_gpu_summary_label()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("GPU 并行设置")
+        dialog.geometry(f"780x{min(700, 350 + len(gpus) * 54)}")
+        dialog.minsize(700, 430)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+
+        heading = ttk.Frame(dialog, padding=(18, 16, 18, 10))
+        heading.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        heading.grid_columnconfigure(0, weight=1)
+        ttk.Label(
+            heading,
+            text=f"检测到 {len(gpus)} 张 CUDA 显卡",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            heading,
+            text="每个任务是一个独立 MinerU 进程。建议先设为每卡 1；显存充足时再逐步增加。",
+            style="Muted.TLabel",
+            wraplength=700,
+        ).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+
+        table = ttk.Labelframe(
+            dialog,
+            text="本机显卡与任务量",
+            padding=12,
+            bootstyle="primary",
+        )
+        table.grid(row=1, column=0, padx=18, pady=(0, 12), sticky=(tk.W, tk.E, tk.N, tk.S))
+        table.grid_columnconfigure(2, weight=1)
+        headers = ("启用", "序号", "显卡", "显存", "每卡任务数")
+        for column, text_value in enumerate(headers):
+            ttk.Label(table, text=text_value, font=("Microsoft YaHei UI", 9, "bold")).grid(
+                row=0, column=column, padx=8, pady=(2, 8), sticky=tk.W
+            )
+
+        preferences = self.gpu_parallel_preferences
+        selected = set(preferences.get("selected_gpu_ids", []))
+        if not selected:
+            selected = {gpu["index"] for gpu in gpus}
+        saved_tasks = preferences.get("tasks_per_gpu", {})
+        enabled_vars = {}
+        worker_vars = {}
+        for row, gpu in enumerate(gpus, start=1):
+            gpu_id = gpu["index"]
+            enabled_var = tk.BooleanVar(value=gpu_id in selected)
+            try:
+                saved_count = int(saved_tasks.get(gpu_id, saved_tasks.get(str(gpu_id), 1)))
+            except (TypeError, ValueError):
+                saved_count = 1
+            worker_var = tk.IntVar(value=max(1, min(4, saved_count)))
+            enabled_vars[gpu_id] = enabled_var
+            worker_vars[gpu_id] = worker_var
+            ttk.Checkbutton(
+                table,
+                variable=enabled_var,
+                bootstyle="success round toggle",
+            ).grid(row=row, column=0, padx=8, pady=7, sticky=tk.W)
+            ttk.Label(table, text=f"GPU {gpu_id}").grid(
+                row=row, column=1, padx=8, pady=7, sticky=tk.W
+            )
+            ttk.Label(table, text=gpu["name"]).grid(
+                row=row, column=2, padx=8, pady=7, sticky=tk.W
+            )
+            ttk.Label(table, text=f"{gpu['memory_gb']:.1f} GiB").grid(
+                row=row, column=3, padx=8, pady=7, sticky=tk.W
+            )
+            ttk.Spinbox(
+                table,
+                from_=1,
+                to=4,
+                textvariable=worker_var,
+                width=7,
+                state="readonly",
+                bootstyle="primary",
+            ).grid(row=row, column=4, padx=8, pady=7, sticky=tk.W)
+
+        note = ttk.Label(
+            dialog,
+            text=(
+                "单卡：只启用一行。多卡：启用多行。CPU：关闭主界面的 GPU 加速。\n"
+                "同一张卡并发过高可能显存不足；若发生 CUDA OOM，请把该卡任务数调回 1。"
+            ),
+            style="Muted.TLabel",
+            wraplength=730,
+            justify=tk.LEFT,
+        )
+        note.grid(row=2, column=0, padx=20, sticky=(tk.W, tk.E))
+
+        buttons = ttk.Frame(dialog, padding=(18, 12, 18, 18))
+        buttons.grid(row=3, column=0, sticky=(tk.W, tk.E))
+        buttons.grid_columnconfigure(4, weight=1)
+
+        def select_all_safe():
+            for gpu in gpus:
+                enabled_vars[gpu["index"]].set(True)
+                worker_vars[gpu["index"]].set(1)
+
+        def select_single():
+            current = next(
+                (gpu["index"] for gpu in gpus if enabled_vars[gpu["index"]].get()),
+                gpus[0]["index"],
+            )
+            for gpu in gpus:
+                enabled_vars[gpu["index"]].set(gpu["index"] == current)
+                if gpu["index"] == current:
+                    worker_vars[gpu["index"]].set(1)
+
+        def refresh_dialog():
+            dialog.destroy()
+            self.open_gpu_parallel_settings(force_refresh=True)
+
+        def save_gpu_settings():
+            selected_ids = [
+                gpu["index"] for gpu in gpus if enabled_vars[gpu["index"]].get()
+            ]
+            if not selected_ids:
+                messagebox.showwarning(
+                    "未选择显卡",
+                    "至少启用一张显卡；如需 CPU 模式，请关闭主界面的 GPU 加速。",
+                    parent=dialog,
+                )
+                return
+            tasks = {}
+            for gpu_id in selected_ids:
+                try:
+                    tasks[gpu_id] = max(1, min(4, int(worker_vars[gpu_id].get())))
+                except (tk.TclError, TypeError, ValueError):
+                    tasks[gpu_id] = 1
+            self.gpu_parallel_preferences = {
+                "selected_gpu_ids": selected_ids,
+                "tasks_per_gpu": tasks,
+            }
+            self._save_directory_preferences()
+            assignments = self._resolve_gpu_assignments()
+            self._refresh_gpu_summary_label()
+            self.log(f"GPU 并行设置已保存: {self._format_gpu_plan(assignments)}")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="全部显卡 · 安全预设", command=select_all_safe).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        ttk.Button(buttons, text="单卡模式", command=select_single).grid(
+            row=0, column=1, padx=6
+        )
+        ttk.Button(buttons, text="重新检测", command=refresh_dialog).grid(
+            row=0, column=2, padx=6
+        )
+        ttk.Button(buttons, text="取消", command=dialog.destroy).grid(
+            row=0, column=5, padx=6
+        )
+        ttk.Button(
+            buttons,
+            text="保存",
+            command=save_gpu_settings,
+            bootstyle="success",
+        ).grid(row=0, column=6, padx=(6, 0))
 
     def _refresh_directory_labels(self):
         if hasattr(self, "input_path_label"):
@@ -613,13 +1101,21 @@ class BatchPDFProcessorGUI:
 
     def _capture_run_options(self):
         """在主线程一次性读取 Tk 变量，后台线程只使用普通 Python 值。"""
+        use_gpu = bool(self.use_gpu_var.get())
+        gpu_assignments = (
+            self._resolve_gpu_assignments()
+            if use_gpu and getattr(self, "_gpu_detection_completed", False)
+            else []
+        )
         self._active_run_options = {
             "extract_text": bool(self.extract_text_var.get()),
             "extract_formula": bool(self.extract_formula_var.get()),
             "extract_figures": bool(self.extract_figures_var.get()),
             "extract_tables": bool(self.extract_tables_var.get()),
             "extract_sections": bool(self.extract_sections_var.get()),
-            "use_gpu": bool(self.use_gpu_var.get()),
+            "extract_open_source": bool(self.extract_open_source_var.get()),
+            "use_gpu": use_gpu,
+            "gpu_assignments": gpu_assignments,
             "skip_processed": bool(self.skip_processed_var.get()),
             "backend": self.backend_var.get(),
             "llm_model": self.llm_model_var.get(),
@@ -643,16 +1139,78 @@ class BatchPDFProcessorGUI:
         self.root.destroy()
 
     def _terminate_active_mineru(self):
-        """终止当前隔离进程；仅由用户点击停止或确认关闭时调用。"""
-        process = self._mineru_process
-        if process is None:
+        """终止全部活动 MinerU 隔离进程。"""
+        lock = getattr(self, "_mineru_process_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._mineru_process_lock = lock
+        with lock:
+            active = getattr(self, "_active_mineru_processes", {})
+            processes = list(dict.fromkeys(active.values()))
+            legacy_process = getattr(self, "_mineru_process", None)
+            if legacy_process is not None and legacy_process not in processes:
+                processes.append(legacy_process)
+
+        stopped = 0
+        for process in processes:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    stopped += 1
+            except (OSError, ProcessLookupError) as exc:
+                self.log(f"停止 MinerU 隔离进程时出现提示: {exc}")
+        if stopped:
+            self.log(f"已向 {stopped} 个活动 MinerU 隔离进程发送停止请求。")
+
+    def _register_mineru_process(self, job_id, process) -> str:
+        lock = getattr(self, "_mineru_process_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._mineru_process_lock = lock
+        if not hasattr(self, "_active_mineru_processes"):
+            self._active_mineru_processes = {}
+        process_key = str(job_id or f"mineru-{id(process)}")
+        with lock:
+            self._active_mineru_processes[process_key] = process
+            self._mineru_process = process
+        return process_key
+
+    def _unregister_mineru_process(self, process_key: str, process=None):
+        lock = getattr(self, "_mineru_process_lock", None)
+        if lock is None:
             return
-        try:
-            if process.poll() is None:
-                process.terminate()
-                self.log("已向当前 MinerU 隔离进程发送停止请求。")
-        except (OSError, ProcessLookupError) as exc:
-            self.log(f"停止 MinerU 隔离进程时出现提示: {exc}")
+        with lock:
+            active = getattr(self, "_active_mineru_processes", {})
+            registered = active.get(process_key)
+            if process is None or registered is process:
+                active.pop(process_key, None)
+            remaining = list(active.values())
+            self._mineru_process = remaining[-1] if remaining else None
+
+    def _set_mineru_issue(self, job_id, issue_code):
+        if job_id is None:
+            self.last_mineru_issue_code = issue_code
+            return
+        lock = getattr(self, "_mineru_issue_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._mineru_issue_lock = lock
+        if not hasattr(self, "_mineru_issue_codes"):
+            self._mineru_issue_codes = {}
+        with lock:
+            if issue_code is None:
+                self._mineru_issue_codes.pop(str(job_id), None)
+            else:
+                self._mineru_issue_codes[str(job_id)] = issue_code
+
+    def _get_mineru_issue(self, job_id):
+        if job_id is None:
+            return getattr(self, "last_mineru_issue_code", None)
+        lock = getattr(self, "_mineru_issue_lock", None)
+        if lock is None:
+            return None
+        with lock:
+            return getattr(self, "_mineru_issue_codes", {}).get(str(job_id))
 
     def setup_styles(self):
         """配置 PaperMiner v1.4.x 的 ttkbootstrap 主题与少量品牌样式。"""
@@ -890,6 +1448,7 @@ class BatchPDFProcessorGUI:
         self.extract_figures_var = tk.BooleanVar(value=True)
         self.extract_tables_var = tk.BooleanVar(value=True)
         self.extract_sections_var = tk.BooleanVar(value=True)
+        self.extract_open_source_var = tk.BooleanVar(value=True)
         self.use_gpu_var = tk.BooleanVar(value=True)
         self.skip_processed_var = tk.BooleanVar(value=True)
 
@@ -911,7 +1470,14 @@ class BatchPDFProcessorGUI:
             '论文章节（正则 + LLM）',
             self.extract_sections_var,
             bootstyle='info',
-        ).grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
+        ).grid(row=7, column=0, sticky=tk.W, pady=2)
+        self.extract_open_source_check = self.create_styled_checkbutton(
+            options_frame,
+            '代码与数据可用性（文末链接）',
+            self.extract_open_source_var,
+            bootstyle='success',
+        )
+        self.extract_open_source_check.grid(row=7, column=1, sticky=tk.W, pady=2)
 
         ttk.Separator(options_frame, orient='horizontal', bootstyle='secondary').grid(
             row=8, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=8
@@ -988,6 +1554,21 @@ class BatchPDFProcessorGUI:
             bootstyle='info round toggle',
         )
         self.skip_checkbox.grid(row=0, column=1, sticky=tk.W)
+        self.gpu_settings_button = ttk.Button(
+            toggle_frame,
+            text='GPU 并行设置',
+            command=self.open_gpu_parallel_settings,
+            state='disabled',
+            bootstyle='outline-primary',
+        )
+        self.gpu_settings_button.grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        self.gpu_summary_label = ttk.Label(
+            toggle_frame,
+            text=self._gpu_summary_text(),
+            style='Muted.TLabel',
+            wraplength=330,
+        )
+        self.gpu_summary_label.grid(row=1, column=1, sticky=tk.W, pady=(8, 0))
 
         # 中栏：任务控制、进度统计和输出。
         control_frame = ttk.Labelframe(
@@ -1105,12 +1686,15 @@ class BatchPDFProcessorGUI:
             command=lambda: self.open_folder(self.extract_output_path),
             bootstyle='secondary outline',
         ).grid(row=1, column=2, sticky=(tk.W, tk.E), padx=(3, 0))
-        ttk.Button(
+        self.merge_markdown_button = ttk.Button(
             output_frame,
-            text='合并同名章节和图表到 Markdown',
+            text='合并同名章节、图表和代码/数据地址',
             command=self.merge_all_sections_and_charts_to_markdown,
             bootstyle='info',
-        ).grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(8, 0))
+        )
+        self.merge_markdown_button.grid(
+            row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(8, 0)
+        )
 
         # 右栏：常驻日志，不再依赖外部 PowerShell 窗口。
         log_frame = ttk.Labelframe(
@@ -1309,6 +1893,7 @@ class BatchPDFProcessorGUI:
         self.extract_figures_var = tk.BooleanVar(value=True)
         self.extract_tables_var = tk.BooleanVar(value=True)
         self.extract_sections_var = tk.BooleanVar(value=True)  # 默认勾选
+        self.extract_open_source_var = tk.BooleanVar(value=True)
         self.use_gpu_var = tk.BooleanVar(value=True)
         self.skip_processed_var = tk.BooleanVar(value=True)
 
@@ -1342,6 +1927,13 @@ class BatchPDFProcessorGUI:
             "📑 提取论文章节 (正则表达式 + LLM)",
             self.extract_sections_var
         ).grid(row=6, column=0, sticky=tk.W, pady=4)
+
+        self.extract_open_source_check = self.create_styled_checkbutton(
+            options_frame,
+            "提取代码与数据可用性（文末链接）",
+            self.extract_open_source_var
+        )
+        self.extract_open_source_check.grid(row=6, column=1, sticky=tk.W, pady=4)
 
         # 当前 LLM 接口及模型。自定义接口在设置中普通单击选择一个模型。
         llm_frame = ttk.Frame(options_frame)
@@ -1409,8 +2001,24 @@ class BatchPDFProcessorGUI:
         )
         self.gpu_checkbox.grid(row=10, column=0, sticky=tk.W, pady=4)
 
+        legacy_gpu_settings = ttk.Frame(options_frame)
+        legacy_gpu_settings.grid(row=11, column=0, sticky=(tk.W, tk.E), pady=(2, 4))
+        self.gpu_settings_button = ttk.Button(
+            legacy_gpu_settings,
+            text="GPU 并行设置",
+            command=self.open_gpu_parallel_settings,
+            state='disabled',
+        )
+        self.gpu_settings_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.gpu_summary_label = ttk.Label(
+            legacy_gpu_settings,
+            text=self._gpu_summary_text(),
+            foreground='#777777',
+        )
+        self.gpu_summary_label.pack(side=tk.LEFT)
+
         ttk.Separator(options_frame, orient='horizontal').grid(
-            row=11, column=0, sticky=(tk.W, tk.E), pady=10
+            row=12, column=0, sticky=(tk.W, tk.E), pady=10
         )
 
         self.skip_checkbox = self.create_styled_checkbutton(
@@ -1418,7 +2026,7 @@ class BatchPDFProcessorGUI:
             "跳过已处理的文件 (extract 中已有结果)",
             self.skip_processed_var
         )
-        self.skip_checkbox.grid(row=12, column=0, sticky=tk.W, pady=4)
+        self.skip_checkbox.grid(row=13, column=0, sticky=tk.W, pady=4)
 
         # 控制按钮区域：开始：停止 = 2 : 1，体现主次（停止 90% 时间 disabled）
         control_frame = ttk.Frame(main_frame)
@@ -1563,11 +2171,14 @@ class BatchPDFProcessorGUI:
             command=lambda: self.open_folder(self.extract_output_path)
         ).grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(6, 0), pady=4)
 
-        ttk.Button(
+        self.merge_markdown_button = ttk.Button(
             output_frame,
-            text="合并同名章节和图表到 Markdown",
+            text="合并同名章节、图表和代码/数据地址",
             command=self.merge_all_sections_and_charts_to_markdown,
-        ).grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(8, 0))
+        )
+        self.merge_markdown_button.grid(
+            row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(8, 0)
+        )
 
         # 底部信息
         footer_frame = ttk.Frame(main_frame)
@@ -1624,7 +2235,7 @@ class BatchPDFProcessorGUI:
             self.log(f"⚠️  无法保存当前 LLM 模型: {exc}")
 
     def merge_all_sections_and_charts_to_markdown(self):
-        """合并同名章节及各论文 Word 文件夹中的图表 Markdown。"""
+        """合并同名章节、图表，以及逐篇代码/数据可用性报告。"""
         target = self.extract_output_path / "MergedSections"
         try:
             (
@@ -1632,7 +2243,9 @@ class BatchPDFProcessorGUI:
                 total_section_articles,
                 section_count,
                 chart_count,
-            ) = merge_sections_and_charts_to_markdown_files(
+                code_source_count,
+                code_link_count,
+            ) = merge_sections_charts_and_code_files(
                 self.extract_output_path,
                 target,
             )
@@ -1648,13 +2261,17 @@ class BatchPDFProcessorGUI:
             f"  - 同名章节：{section_count} 类，累计写入 {total_section_articles} 篇文章章节"
         )
         self.log(f"  - 图表汇总：合并 {chart_count} 个 Word 文件夹 Markdown")
+        self.log(
+            f"  - 代码/数据地址：汇总 {code_source_count} 篇论文，可信地址 {code_link_count} 个"
+        )
         for output in outputs:
             self.log(f"  - {output}")
         messagebox.showinfo(
             "合并完成",
             (
                 f"已生成 {len(outputs)} 个 Markdown 文件。\n"
-                f"同名章节：{section_count} 类；图表来源：{chart_count} 个。\n"
+                f"同名章节：{section_count} 类；图表来源：{chart_count} 个；\n"
+                f"代码/数据报告：{code_source_count} 篇，地址：{code_link_count} 个。\n"
                 f"输出目录：{target}"
             ),
         )
@@ -1710,6 +2327,10 @@ class BatchPDFProcessorGUI:
     def log(self, message: str):
         """添加日志消息到 GUI 和 UTF-8 日志文件（线程安全）。"""
         message = str(message)
+        context = getattr(self, "_thread_log_context", None)
+        prefix = getattr(context, "prefix", "") if context is not None else ""
+        if prefix and message and not message.startswith(prefix):
+            message = f"{prefix}{message}"
         if sys.stdout is not None:
             print(message, flush=True)
         if self._log_handle is not None:
@@ -1720,6 +2341,18 @@ class BatchPDFProcessorGUI:
             except (OSError, ValueError):
                 pass
         self._post_ui(self._append_log, message)
+
+    def _set_thread_log_prefix(self, prefix: str):
+        context = getattr(self, "_thread_log_context", None)
+        if context is None:
+            context = threading.local()
+            self._thread_log_context = context
+        context.prefix = prefix
+
+    def _clear_thread_log_prefix(self):
+        context = getattr(self, "_thread_log_context", None)
+        if context is not None:
+            context.prefix = ""
 
     def _initialize_file_logging(self):
         """为本次 GUI 会话创建独立日志文件。"""
@@ -1805,6 +2438,11 @@ class BatchPDFProcessorGUI:
         extract_dir = self.extract_output_path / pdf_name
         if not extract_dir.exists():
             return False
+        # 升级后若用户勾选了新功能，旧输出目录必须完成 v2 代码/数据扫描。
+        # 空结果只有 JSON 完成标记，不要求存在 Markdown 报告。
+        if self._run_option("extract_open_source", False):
+            if not availability_scan_completed(extract_dir):
+                return False
         try:
             for item in extract_dir.rglob('*'):
                 if item.is_file():
@@ -1828,11 +2466,19 @@ class BatchPDFProcessorGUI:
         if mode == "extract_only":
             # 仅提取模式：禁用 GPU 和后端选项
             self.gpu_checkbox.config(state='disabled')
+            self.gpu_settings_button.config(state='disabled')
             self.use_gpu_var.set(False)
             self.backend_combo.config(state='disabled')
         else:
             # 完整处理模式：启用 GPU 和后端选项
             self.gpu_checkbox.config(state='normal')
+            gpu_settings_ready = (
+                getattr(self, "_gpu_detection_completed", False)
+                and not getattr(self, "_gpu_detection_in_progress", False)
+            )
+            self.gpu_settings_button.config(
+                state='normal' if gpu_settings_ready else 'disabled'
+            )
             self.use_gpu_var.set(True)
             self.backend_combo.config(state='readonly')
 
@@ -1840,19 +2486,36 @@ class BatchPDFProcessorGUI:
         """开始处理"""
         mode = self.process_mode_var.get()
 
+        if (
+            mode == "full"
+            and self.use_gpu_var.get()
+            and not getattr(self, "_gpu_detection_completed", False)
+        ):
+            messagebox.showinfo(
+                "正在检测显卡",
+                "GPU 检测尚未完成，请稍候再开始。\n"
+                "如果希望立即运行，可以关闭“GPU 加速”使用 CPU 模式。",
+                parent=self.root,
+            )
+            return
+
         # 检查是否至少选择了一项提取内容
         if not any([
             self.extract_text_var.get(),
             self.extract_formula_var.get(),
             self.extract_figures_var.get(),
             self.extract_tables_var.get(),
-            self.extract_sections_var.get()
+            self.extract_sections_var.get(),
+            self.extract_open_source_var.get(),
         ]):
             messagebox.showwarning(
                 "未选择提取项",
                 "请至少选择一项提取内容！"
             )
             return
+
+        # 在计算“跳过已有结果”前快照当前选项；后台线程随后只读普通值。
+        self._capture_run_options()
 
         if mode == "full":
             # 完整处理模式：需要 PDF 文件
@@ -1877,8 +2540,16 @@ class BatchPDFProcessorGUI:
                 extract_items.append("表格")
             if self.extract_sections_var.get():
                 extract_items.append("论文章节")
+            if self.extract_open_source_var.get():
+                extract_items.append("代码与数据可用性")
 
             extract_desc = "、".join(extract_items)
+            if self._run_option("use_gpu", True):
+                gpu_desc = self._format_gpu_plan(
+                    self._run_option("gpu_assignments", [])
+                )
+            else:
+                gpu_desc = "CPU 模式"
 
             # 计算跳过数量
             if self.skip_processed_var.get():
@@ -1894,12 +2565,14 @@ class BatchPDFProcessorGUI:
                     f"共 {len(pdf_files)} 个 PDF 文件。\n\n"
                     f"将跳过: {skip_count} 个 (已有处理结果)\n"
                     f"实际处理: {actual_count} 个\n\n"
-                    f"提取项目：{extract_desc}\n\n是否继续？"
+                    f"提取项目：{extract_desc}\n"
+                    f"计算计划：{gpu_desc}\n\n是否继续？"
                 )
             else:
                 confirm_msg = (
                     f"将完整处理 {len(pdf_files)} 个 PDF 文件。\n\n"
-                    f"提取项目：{extract_desc}\n\n"
+                    f"提取项目：{extract_desc}\n"
+                    f"计算计划：{gpu_desc}\n\n"
                     f"这将运行 MinerU 并提取内容。\n\n是否继续？"
                 )
 
@@ -1940,6 +2613,8 @@ class BatchPDFProcessorGUI:
                 extract_items.append("表格")
             if self.extract_sections_var.get():
                 extract_items.append("论文章节")
+            if self.extract_open_source_var.get():
+                extract_items.append("代码与数据可用性")
 
             extract_desc = "、".join(extract_items)
 
@@ -2027,56 +2702,26 @@ class BatchPDFProcessorGUI:
             self.precheck_mineru_environment()
             self.check_gpu_status()
 
-            # 处理每个 PDF
-            for i, pdf_file in enumerate(pdf_files):
-                if not self.is_processing:
-                    self.log("\n❌ 处理已停止")
-                    break
+            gpu_slots = []
+            if self._run_option("use_gpu", False):
+                for assignment in self._run_option("gpu_assignments", []):
+                    gpu_slots.extend(
+                        [assignment["index"]] * max(1, int(assignment["workers"]))
+                    )
 
-                self.current_pdf_index = i + 1
-                self._post_ui(self.update_progress)
-
-                # 检查是否跳过已处理的文件
-                if self._run_option("skip_processed", True) and self.is_already_processed(pdf_file.stem):
-                    self.skipped_count += 1
-                    self.log(f"\n⏭ 跳过已处理: {pdf_file.name}")
-                    self._post_ui(self.update_stats)
-                    continue
-
-                self.log("\n" + "=" * 60)
-                self.log(f"[{i+1}/{len(pdf_files)}] 处理: {pdf_file.name}")
-                self.log("=" * 60)
-
-                # 步骤 1: 使用 MinerU 处理 PDF
-                raw_dir = self.run_mineru(pdf_file)
-
-                if raw_dir is not None:
-                    # 步骤 2: 提取和整理结果
-                    extract_ok = self.extract_and_organize(pdf_file.stem, raw_dir=raw_dir)
-                    if extract_ok:
-                        self.success_count += 1
-                        self.log(f"✅ 完成: {pdf_file.name}")
-                    else:
-                        self.failed_count += 1
-                        self.log(f"❌ 提取失败: {pdf_file.name}")
-                else:
-                    self.failed_count += 1
-                    self.log(f"❌ 失败: {pdf_file.name}")
-                    if self.last_mineru_issue_code in {
-                        "model_snapshot_missing",
-                        "hf_network_error",
-                        "mineru_config_missing",
-                        "mineru_missing",
-                        "unsupported_mineru_version",
-                        "mineru_worker_missing",
-                    }:
-                        self.log("⚠️  检测到环境级错误，停止后续文件处理。请先修复环境后重试。")
-                        self._release_batch_memory(pdf_file.name)
-                        break
-
-                # 更新统计显示
-                self._post_ui(self.update_stats)
-                self._release_batch_memory(pdf_file.name)
+            if len(gpu_slots) > 1:
+                self.log(
+                    f"启动多 GPU 调度: {len(gpu_slots)} 个 MinerU 工作槽；"
+                    "GPU 解析与 CPU/LLM 后处理采用流水线。"
+                )
+                self._process_pdfs_parallel(pdf_files, gpu_slots)
+            else:
+                selected_gpu = gpu_slots[0] if gpu_slots else None
+                self._process_pdfs_sequential(
+                    pdf_files,
+                    gpu_id=selected_gpu,
+                    bind_gpu=bool(gpu_slots),
+                )
 
             # 处理完成
             self.log("\n" + "=" * 60)
@@ -2095,6 +2740,294 @@ class BatchPDFProcessorGUI:
             import traceback
             self.log(traceback.format_exc())
             self._post_ui(self.processing_complete)
+
+    def _advance_batch_progress(self):
+        self.current_pdf_index = (
+            self.success_count + self.failed_count + self.skipped_count
+        )
+        self._post_ui(self.update_progress)
+        self._post_ui(self.update_stats)
+
+    def _process_pdfs_sequential(
+        self,
+        pdf_files: List[Path],
+        gpu_id: 'int | None' = None,
+        bind_gpu: bool = False,
+    ):
+        """单槽模式；仍显式绑定用户选中的 GPU，支持只用 GPU 1 等场景。"""
+        for i, pdf_file in enumerate(pdf_files):
+            if not self.is_processing:
+                self.log("\n❌ 处理已停止")
+                break
+
+            if (
+                self._run_option("skip_processed", True)
+                and self.is_already_processed(pdf_file.stem)
+            ):
+                self.skipped_count += 1
+                self.log(f"\n⏭ 跳过已处理: {pdf_file.name}")
+                self._advance_batch_progress()
+                continue
+
+            self.log("\n" + "=" * 60)
+            self.log(f"[{i + 1}/{len(pdf_files)}] 处理: {pdf_file.name}")
+            self.log("=" * 60)
+            job_id = f"sequential-{i + 1}"
+            if bind_gpu:
+                self._set_thread_log_prefix(f"[GPU {gpu_id}] ")
+            try:
+                if bind_gpu:
+                    raw_dir = self.run_mineru(
+                        pdf_file,
+                        gpu_id=gpu_id,
+                        job_id=job_id,
+                    )
+                    issue_code = self._get_mineru_issue(job_id)
+                else:
+                    # 保留 CPU/旧配置的单参数调用，兼容现有扩展和回归探针。
+                    raw_dir = self.run_mineru(pdf_file)
+                    issue_code = self.last_mineru_issue_code
+
+                if raw_dir is not None:
+                    extract_ok = self.extract_and_organize(
+                        pdf_file.stem,
+                        raw_dir=raw_dir,
+                    )
+                    if extract_ok:
+                        self.success_count += 1
+                        self.log(f"✅ 完成: {pdf_file.name}")
+                    else:
+                        self.failed_count += 1
+                        self.log(f"❌ 提取失败: {pdf_file.name}")
+                else:
+                    self.failed_count += 1
+                    self.log(f"❌ 失败: {pdf_file.name}")
+                    if issue_code in self.FATAL_MINERU_ISSUES:
+                        self.log(
+                            "⚠️  检测到环境级错误，停止后续文件处理。"
+                            "请先修复环境后重试。"
+                        )
+                        self._release_batch_memory(pdf_file.name)
+                        self._advance_batch_progress()
+                        break
+            finally:
+                self._clear_thread_log_prefix()
+                if bind_gpu:
+                    self._set_mineru_issue(job_id, None)
+
+            self._advance_batch_progress()
+            self._release_batch_memory(pdf_file.name)
+
+    def _process_pdfs_parallel(self, pdf_files: List[Path], gpu_slots: List[int]):
+        """固定 GPU 工作槽并行解析，并把整理步骤流水化到后处理线程。"""
+        pending_jobs = []
+        for position, pdf_file in enumerate(pdf_files, start=1):
+            if (
+                self._run_option("skip_processed", True)
+                and self.is_already_processed(pdf_file.stem)
+            ):
+                self.skipped_count += 1
+                self.log(f"\n⏭ 跳过已处理: {pdf_file.name}")
+                self._advance_batch_progress()
+                continue
+            pending_jobs.append(
+                {
+                    "position": position,
+                    "pdf_file": pdf_file,
+                    "job_id": f"parallel-{position}",
+                }
+            )
+
+        if not pending_jobs:
+            return
+
+        parse_queue = queue.Queue()
+        result_queue = queue.Queue()
+        fatal_event = threading.Event()
+        for job in pending_jobs:
+            parse_queue.put(job)
+
+        def parse_worker(slot_number: int, gpu_id: int):
+            while True:
+                try:
+                    job = parse_queue.get_nowait()
+                except queue.Empty:
+                    return
+                pdf_file = job["pdf_file"]
+                try:
+                    if not self.is_processing or fatal_event.is_set():
+                        result_queue.put({**job, "cancelled": True, "gpu_id": gpu_id})
+                        continue
+
+                    self._set_thread_log_prefix(
+                        f"[GPU {gpu_id}][槽 {slot_number}] "
+                    )
+                    self.log("\n" + "=" * 60)
+                    self.log(
+                        f"[{job['position']}/{len(pdf_files)}] 处理: {pdf_file.name}"
+                    )
+                    self.log("=" * 60)
+                    raw_dir = self.run_mineru(
+                        pdf_file,
+                        gpu_id=gpu_id,
+                        job_id=job["job_id"],
+                    )
+                    issue_code = self._get_mineru_issue(job["job_id"])
+                    if issue_code in self.FATAL_MINERU_ISSUES:
+                        fatal_event.set()
+                    result_queue.put(
+                        {
+                            **job,
+                            "cancelled": False,
+                            "gpu_id": gpu_id,
+                            "raw_dir": raw_dir,
+                            "issue_code": issue_code,
+                        }
+                    )
+                except Exception as exc:
+                    self.log(f"❌ GPU 工作槽异常: {exc}")
+                    self.log(traceback.format_exc())
+                    result_queue.put(
+                        {
+                            **job,
+                            "cancelled": False,
+                            "gpu_id": gpu_id,
+                            "raw_dir": None,
+                            "issue_code": "scheduler_worker_failed",
+                        }
+                    )
+                finally:
+                    self._set_mineru_issue(job["job_id"], None)
+                    self._clear_thread_log_prefix()
+                    parse_queue.task_done()
+
+        workers = []
+        for slot_number, gpu_id in enumerate(gpu_slots, start=1):
+            worker = threading.Thread(
+                target=parse_worker,
+                args=(slot_number, gpu_id),
+                daemon=True,
+                name=f"PaperMiner-GPU-{gpu_id}-Slot-{slot_number}",
+            )
+            workers.append(worker)
+            worker.start()
+
+        def extract_job(result):
+            pdf_file = result["pdf_file"]
+            self._set_thread_log_prefix(f"[后处理][{pdf_file.name}] ")
+            try:
+                if not self.is_processing:
+                    return "cancelled"
+                ok = self.extract_and_organize(
+                    pdf_file.stem,
+                    raw_dir=result["raw_dir"],
+                )
+                return "success" if ok else "failed"
+            except Exception as exc:
+                self.log(f"❌ 提取任务异常: {exc}")
+                self.log(traceback.format_exc())
+                return "failed"
+            finally:
+                self._clear_thread_log_prefix()
+
+        post_queue = queue.Queue()
+        completion_queue = queue.Queue()
+        cancelled_count = 0
+        fatal_notice_shown = False
+        post_workers = max(1, min(2, len(gpu_slots)))
+
+        def post_worker(worker_number: int):
+            while True:
+                result = post_queue.get()
+                try:
+                    if result is None:
+                        return
+                    completion_queue.put((result, extract_job(result)))
+                except Exception as exc:
+                    if result is not None:
+                        self.log(f"❌ 后处理工作槽 {worker_number} 异常: {exc}")
+                        self.log(traceback.format_exc())
+                        completion_queue.put((result, "failed"))
+                finally:
+                    post_queue.task_done()
+
+        post_threads = []
+        for worker_number in range(1, post_workers + 1):
+            thread = threading.Thread(
+                target=post_worker,
+                args=(worker_number,),
+                daemon=True,
+                name=f"PaperMiner-Post-{worker_number}",
+            )
+            post_threads.append(thread)
+            thread.start()
+
+        extraction_count = 0
+        for _ in range(len(pending_jobs)):
+            result = result_queue.get()
+            pdf_file = result["pdf_file"]
+
+            if result.get("cancelled"):
+                self.skipped_count += 1
+                cancelled_count += 1
+                self._advance_batch_progress()
+                continue
+
+            raw_dir = result.get("raw_dir")
+            issue_code = result.get("issue_code")
+            if raw_dir is None:
+                if not self.is_processing or (
+                    fatal_event.is_set()
+                    and issue_code not in self.FATAL_MINERU_ISSUES
+                ):
+                    self.skipped_count += 1
+                    cancelled_count += 1
+                else:
+                    self.failed_count += 1
+                    self.log(f"❌ 失败: {pdf_file.name}")
+                self._advance_batch_progress()
+                self._release_batch_memory(pdf_file.name)
+
+                if issue_code in self.FATAL_MINERU_ISSUES:
+                    fatal_event.set()
+                    self._terminate_active_mineru()
+                    if not fatal_notice_shown:
+                        self.log(
+                            "⚠️  检测到环境级错误，已停止全部 GPU 工作槽；"
+                            "请先修复环境后重试。"
+                        )
+                        fatal_notice_shown = True
+                continue
+
+            post_queue.put(result)
+            extraction_count += 1
+
+        for worker in workers:
+            worker.join(timeout=5)
+        for _ in post_threads:
+            post_queue.put(None)
+
+        for _ in range(extraction_count):
+            result, status = completion_queue.get()
+            pdf_file = result["pdf_file"]
+            if status == "success":
+                self.success_count += 1
+                self.log(f"✅ 完成: {pdf_file.name}")
+            elif status == "cancelled":
+                self.skipped_count += 1
+                cancelled_count += 1
+            else:
+                self.failed_count += 1
+                self.log(f"❌ 提取失败: {pdf_file.name}")
+            self._advance_batch_progress()
+            self._release_batch_memory(pdf_file.name)
+
+        for thread in post_threads:
+            thread.join(timeout=1)
+
+        if cancelled_count:
+            reason = "用户停止" if not self.is_processing else "环境错误"
+            self.log(f"{reason}后未继续执行: {cancelled_count} 个文件")
 
     def update_progress(self):
         """更新进度。status_label 承载"状态 · X / Y"总进度；progress_text 留给
@@ -2206,45 +3139,61 @@ class BatchPDFProcessorGUI:
         self.log("；".join(parts))
 
     def check_gpu_status(self):
-        """检查 GPU 状态"""
+        """检查全部 CUDA 显卡，并把本批次计划修正为当前真实设备。"""
+        self.log("=== GPU 诊断 ===")
         try:
-            self.log("=== GPU 诊断 ===")
-
-            result = subprocess.run([
-                sys.executable, "-c",
-                "import torch; "
-                "print('PyTorch:', torch.__version__); "
-                "print('CUDA:', torch.cuda.is_available()); "
-                "print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
-            ], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
-
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    self.log(line)
-
-                # 检查 CUDA 是否可用
-                cuda_check = subprocess.run([
-                    sys.executable, "-c",
-                    "import torch; exit(0 if torch.cuda.is_available() else 1)"
-                ], capture_output=True, timeout=10)
-
-                if cuda_check.returncode != 0:
-                    self.log("⚠️  CUDA 不可用，将使用 CPU 模式")
-                    self._active_run_options["use_gpu"] = False
-                    self._post_ui(self.use_gpu_var.set, False)
-                else:
-                    self.log("✅ GPU 加速已启用")
+            gpus = self._detect_available_gpus()
+            self.log(f"PyTorch: {getattr(self, '_detected_torch_version', '未知')}")
+            if not gpus:
+                self.log(
+                    f"⚠️  CUDA 不可用，将使用 CPU 模式："
+                    f"{self._gpu_detection_error or '未发现 CUDA 显卡'}"
+                )
+                self._active_run_options["use_gpu"] = False
+                self._active_run_options["gpu_assignments"] = []
+                self._post_ui(self.use_gpu_var.set, False)
             else:
-                self.log("⚠️  GPU 检查失败")
-
+                for gpu in gpus:
+                    self.log(
+                        f"GPU {gpu['index']}: {gpu['name']}，"
+                        f"显存 {gpu['memory_gb']:.1f} GiB"
+                    )
+                if self._run_option("use_gpu", True):
+                    assignments = self._resolve_gpu_assignments()
+                    self._active_run_options["gpu_assignments"] = assignments
+                    self.log(f"✅ 本批次计算计划: {self._format_gpu_plan(assignments)}")
+                else:
+                    self.log("本批次已选择 CPU 模式，不启动 CUDA 任务。")
             self.log("=" * 60)
             self.log("")
-
-        except Exception as e:
-            self.log(f"⚠️  GPU 状态检查失败: {str(e)}")
+        except Exception as exc:
+            self.log(f"⚠️  GPU 状态检查失败，将使用 CPU 模式: {exc}")
+            self._active_run_options["use_gpu"] = False
+            self._active_run_options["gpu_assignments"] = []
+            self._post_ui(self.use_gpu_var.set, False)
             self.log("")
 
-    def run_mineru(self, pdf_file: Path) -> 'Path | None':
+    @staticmethod
+    def _build_mineru_worker_env(device: str, model_source: str, gpu_id=None) -> dict:
+        """构造隔离 MinerU 进程环境，并在多卡模式下固定到一张物理卡。"""
+        worker_env = os.environ.copy()
+        worker_env["MINERU_DEVICE_MODE"] = device
+        worker_env["MINERU_MODEL_SOURCE"] = model_source
+        worker_env["PYTHONIOENCODING"] = "utf-8"
+        worker_env["PYTHONFAULTHANDLER"] = "1"
+        worker_env["PYTHONNOUSERSITE"] = "1"
+        if device == "cuda" and gpu_id is not None:
+            worker_env["CUDA_VISIBLE_DEVICES"] = str(int(gpu_id))
+        elif device == "cpu":
+            worker_env["CUDA_VISIBLE_DEVICES"] = ""
+        return worker_env
+
+    def run_mineru(
+        self,
+        pdf_file: Path,
+        gpu_id: 'int | None' = None,
+        job_id: 'str | None' = None,
+    ) -> 'Path | None':
         """在隔离子进程中调用 MinerU，成功返回 raw_dir，失败返回 None。
 
         pipeline 会加载 CUDA、PyTorch、ONNX Runtime 等原生库。原生访问冲突或
@@ -2254,8 +3203,9 @@ class BatchPDFProcessorGUI:
         """
         output_tail: List[str] = []
         process = None
+        process_key = None
         try:
-            self.last_mineru_issue_code = None
+            self._set_mineru_issue(job_id, None)
             self.log("步骤 1: 使用 MinerU 处理 PDF (稳定隔离进程)...")
 
             device = "cuda" if self._run_option("use_gpu", True) else "cpu"
@@ -2263,16 +3213,12 @@ class BatchPDFProcessorGUI:
             model_source = os.environ.get("MINERU_MODEL_SOURCE", "modelscope")
             worker_script = Path(__file__).resolve().with_name("mineru_worker.py")
             if not worker_script.is_file():
-                self.last_mineru_issue_code = "mineru_worker_missing"
+                self._set_mineru_issue(job_id, "mineru_worker_missing")
                 self.log(f"❌ MinerU 隔离组件缺失: {worker_script}")
                 self.log("  请从 PaperMiner 安装程序执行重装。")
                 return None
 
-            runtime_python = Path(sys.executable).resolve()
-            if runtime_python.name.lower() == "pythonw.exe":
-                console_python = runtime_python.with_name("python.exe")
-                if console_python.is_file():
-                    runtime_python = console_python
+            runtime_python = self._runtime_console_python()
 
             command = (
                 str(runtime_python),
@@ -2289,12 +3235,12 @@ class BatchPDFProcessorGUI:
                 "--model-source",
                 model_source,
             )
-            worker_env = os.environ.copy()
-            worker_env["MINERU_DEVICE_MODE"] = device
-            worker_env["MINERU_MODEL_SOURCE"] = model_source
-            worker_env["PYTHONIOENCODING"] = "utf-8"
-            worker_env["PYTHONFAULTHANDLER"] = "1"
-            worker_env["PYTHONNOUSERSITE"] = "1"
+            worker_env = self._build_mineru_worker_env(device, model_source, gpu_id)
+            if device == "cuda" and gpu_id is not None:
+                self.log(
+                    f"GPU 绑定: 物理 GPU {gpu_id} "
+                    "(隔离进程内映射为 cuda:0)"
+                )
 
             creation_flags = 0
             if sys.platform == "win32":
@@ -2311,7 +3257,7 @@ class BatchPDFProcessorGUI:
                 env=worker_env,
                 creationflags=creation_flags,
             )
-            self._mineru_process = process
+            process_key = self._register_mineru_process(job_id, process)
             if process.stdout is not None:
                 for raw_line in process.stdout:
                     line = raw_line.rstrip("\r\n")
@@ -2321,7 +3267,8 @@ class BatchPDFProcessorGUI:
                         output_tail.pop(0)
 
             exit_code = process.wait()
-            self._mineru_process = None
+            self._unregister_mineru_process(process_key, process)
+            process_key = None
             if exit_code != 0:
                 unsigned_code = exit_code & 0xFFFFFFFF
                 code_text = f"{exit_code} (0x{unsigned_code:08X})"
@@ -2329,11 +3276,11 @@ class BatchPDFProcessorGUI:
                 self.log(f"❌ MinerU 隔离进程异常退出，代码: {code_text}")
 
                 if exit_code == 11:
-                    self.last_mineru_issue_code = "mineru_missing"
+                    self._set_mineru_issue(job_id, "mineru_missing")
                 elif exit_code == 12:
-                    self.last_mineru_issue_code = "unsupported_mineru_version"
+                    self._set_mineru_issue(job_id, "unsupported_mineru_version")
                 elif unsigned_code >= 0x80000000:
-                    self.last_mineru_issue_code = "mineru_native_crash"
+                    self._set_mineru_issue(job_id, "mineru_native_crash")
                     native_hints = {
                         0xC0000005: "原生访问冲突（常见于 CUDA/显卡驱动/原生推理库）",
                         0xC0000017: "系统无法分配所需内存",
@@ -2349,7 +3296,7 @@ class BatchPDFProcessorGUI:
                     self.log(f"  判定: {hint}")
                     self.log("  主程序已被隔离保护；该文献记为失败，其余队列可继续。")
                 else:
-                    self.last_mineru_issue_code = "mineru_worker_failed"
+                    self._set_mineru_issue(job_id, "mineru_worker_failed")
 
                 diagnosis = self.diagnose_mineru_output(output_tail)
                 if diagnosis:
@@ -2367,7 +3314,7 @@ class BatchPDFProcessorGUI:
             self.log("❌ MinerU 执行成功但未生成有效输出文件")
             diagnosis = self.diagnose_mineru_output(output_tail)
             if diagnosis:
-                self.last_mineru_issue_code = diagnosis.get("code")
+                self._set_mineru_issue(job_id, diagnosis.get("code"))
             self.log_mineru_diagnosis(diagnosis, output_tail)
             return None
 
@@ -2380,11 +3327,12 @@ class BatchPDFProcessorGUI:
             output_tail.extend(tb.splitlines())
             diagnosis = self.diagnose_mineru_output(output_tail)
             if diagnosis:
-                self.last_mineru_issue_code = diagnosis.get("code")
+                self._set_mineru_issue(job_id, diagnosis.get("code"))
                 self.log_mineru_diagnosis(diagnosis, output_tail)
             return None
         finally:
-            self._mineru_process = None
+            if process_key is not None:
+                self._unregister_mineru_process(process_key, process)
             if process is not None and process.stdout is not None:
                 try:
                     process.stdout.close()
@@ -2713,6 +3661,15 @@ class BatchPDFProcessorGUI:
             # 提取表格 - 保存到extract/pdf_name/Tables/
             if self._run_option("extract_tables", True):
                 if self.extract_tables(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
+                    any_success = True
+
+            # 识别论文末尾的代码与数据可用性链接；有可信结果时保存 Markdown。
+            if self._run_option("extract_open_source", True):
+                if self.extract_open_source_code_addresses(
+                    raw_pdf_dir,
+                    extract_pdf_dir,
+                    actual_pdf_name,
+                ):
                     any_success = True
 
             # 先创建 Word 文件夹（不依赖 LLM），避免 LLM 长耗时或失败时丢失 Word/docx 产出
@@ -3317,6 +4274,113 @@ class BatchPDFProcessorGUI:
         except Exception as e:
             self.log(f"    ❌ 表格提取失败: {str(e)}")
             import traceback
+            self.log(traceback.format_exc())
+            return False
+
+    def extract_open_source_code_addresses(
+        self,
+        raw_dir: Path,
+        extract_dir: Path,
+        pdf_name: str,
+    ) -> bool:
+        """提取论文文末代码/数据可用性链接；空结果不写 Markdown。"""
+        try:
+            self.log("  - 识别文末代码与数据可用性链接...")
+            md_file = self.find_file_by_glob(raw_dir, f"{pdf_name}.md", "*.md")
+            if md_file is None:
+                self.log("    ⚠️  未找到 MinerU Markdown，无法识别代码/数据地址")
+                return False
+
+            content_list = self.find_file_by_glob(
+                raw_dir,
+                f"{pdf_name}_content_list.json",
+                "*_content_list.json",
+            )
+            origin_pdf = self.find_file_by_glob(
+                raw_dir,
+                f"{pdf_name}_origin.pdf",
+                "*_origin.pdf",
+            )
+            markdown_content = md_file.read_text(encoding="utf-8", errors="replace")
+            llm_callback = None
+            if LLM_AVAILABLE:
+                try:
+                    model_name = self._run_option("llm_model", "")
+                    provider = self._run_option("llm_provider", "deepseek")
+                    base_path = Path(getattr(self, "base_path", Path(__file__).parent.parent))
+                    output_path = Path(getattr(self, "output_path", extract_dir.parent.parent))
+                    llm = LLMHelper(
+                        model_name=model_name,
+                        provider=provider,
+                        env_path=base_path / ".env",
+                        require_api=False,
+                        debug_dir=output_path / "debug",
+                    )
+                    if not llm.configuration_error:
+                        self.log(
+                            f"    使用 {provider} / {llm.model_name} 对候选超链接做 LLM 核验"
+                        )
+
+                        def llm_callback(prompt):
+                            return llm.call_llm(
+                                prompt,
+                                max_tokens=1400,
+                                temperature=0.0,
+                                max_retries=1,
+                                verbose=False,
+                                json_mode=True,
+                            )
+                    else:
+                        self.log("    ⓘ 未配置可用 LLM，使用本地规则识别")
+                except (OSError, ValueError, TypeError) as exc:
+                    self.log(f"    ⓘ LLM 初始化不可用，回退本地规则: {exc}")
+
+            result = extract_availability_links(
+                markdown_content,
+                content_list,
+                origin_pdf,
+                llm_callback=llm_callback,
+            )
+            target_dir = extract_dir / "OpenSource"
+            target = target_dir / AVAILABILITY_REPORT_FILENAME
+            report = write_availability_report(extract_dir.name, result.links, target)
+            marker = target_dir / AVAILABILITY_SCAN_FILENAME
+            write_availability_scan_marker(marker, result, report is not None)
+
+            if result.llm_attempted and not result.llm_succeeded:
+                self.log(
+                    f"    ⚠️  LLM 核验未完成，已保留规则结果: "
+                    f"{result.llm_error or '未知响应错误'}"
+                )
+
+            if result.links:
+                code_count = sum(
+                    link.resource_type in {"代码", "代码与数据"}
+                    for link in result.links
+                )
+                data_count = sum(
+                    link.resource_type in {"数据集", "代码与数据"}
+                    for link in result.links
+                )
+                self.log(
+                    f"    ✓ 识别到 {len(result.links)} 个可信地址："
+                    f"代码 {code_count}，数据集 {data_count}"
+                )
+                for link in result.links:
+                    self.log(
+                        f"      - [{link.resource_type}][{link.confidence}] "
+                        f"{link.platform}: {link.url}"
+                    )
+                self.log(f"    ✓ 已保存: {report}")
+            else:
+                self.log(
+                    "    ⓘ 文末未识别到可信代码或数据集地址；"
+                    "扫描已完成，不生成 Markdown 报告"
+                )
+            self.log(f"    ✓ 扫描状态: {marker}")
+            return True
+        except Exception as exc:
+            self.log(f"    ❌ 代码/数据可用性提取失败: {exc}")
             self.log(traceback.format_exc())
             return False
 
@@ -4812,7 +5876,7 @@ def main():
         messagebox.showerror(
             'PaperMiner 缺少界面依赖',
             '未检测到 ttkbootstrap。\n\n'
-            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.5 依赖。\n\n'
+            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.8 依赖。\n\n'
             f'详细信息：{_TTKBOOTSTRAP_IMPORT_ERROR}',
             parent=root,
         )

@@ -132,7 +132,7 @@ set "PYTHONNOUSERSITE=1"
 :: Quick check: already installed?
 :: ----------------------------------------
 echo Checking existing installation...
-"%PYTHON_EXE%" -m pip show mineru torch pandas ttkbootstrap >nul 2>nul
+"%PYTHON_EXE%" -m pip show mineru torch pandas ttkbootstrap pypdf >nul 2>nul
 if not !errorlevel!==0 goto :install_deps
 "%PYTHON_EXE%" -c "import importlib.metadata as m,re; p=[int(x) for x in re.findall(r'\d+',m.version('mineru'))[:2]]; raise SystemExit(0 if tuple(p)>=(3,1) and tuple(p)<(4,0) else 1)" >nul 2>nul
 if not !errorlevel!==0 goto :install_deps
@@ -366,7 +366,7 @@ if exist "packages\ttkbootstrap-2.2.2-py3-none-any.whl" (
 if exist "requirements.txt" (
     %PIP_CMD% install -r requirements.txt
 ) else (
-    %PIP_CMD% install "ttkbootstrap>=2.2.2,<3.0" pandas openpyxl beautifulsoup4 python-docx lxml requests python-dotenv
+    %PIP_CMD% install "ttkbootstrap>=2.2.2,<3.0" pandas openpyxl beautifulsoup4 python-docx lxml "pypdf>=5.0.0,<7.0" requests python-dotenv
 )
 
 :: ----------------------------------------

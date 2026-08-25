@@ -1,4 +1,5 @@
-"""Merge matching article sections and chart summaries into Markdown or Word."""
+"""Merge article sections, chart summaries, and open-source links."""
+import json
 import os
 from pathlib import Path
 import re
@@ -49,6 +50,45 @@ def find_chart_markdowns(extract_root: Path):
         )
         for path in markdown_files:
             result.append((article_dir.name, path))
+    return result
+
+
+def find_open_source_markdowns(extract_root: Path):
+    """Return only reports containing trusted code/data addresses.
+
+    A v2 scan marker with zero results suppresses any stale v1.4.6 audit report
+    without deleting user files. Legacy reports without a marker are accepted
+    only when they contain at least one address.
+    """
+    result = []
+    article_dirs = sorted(
+        (path for path in extract_root.iterdir() if path.is_dir()),
+        key=lambda path: path.name.casefold(),
+    ) if extract_root.exists() else []
+    for article_dir in article_dirs:
+        if article_dir.name == "MergedSections":
+            continue
+        source_dir = article_dir / "OpenSource"
+        marker = source_dir / "availability_scan.json"
+        source = source_dir / "代码与数据可用性.md"
+        if marker.is_file():
+            try:
+                scan = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+                if int(scan.get("trusted_link_count", 0)) <= 0:
+                    continue
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if source.is_file() and source.stat().st_size > 0:
+                content = source.read_text(encoding="utf-8", errors="replace")
+                if re.search(r"(?m)^- 地址：", content):
+                    result.append((article_dir.name, source))
+            continue
+
+        legacy = source_dir / "开源代码地址.md"
+        if legacy.is_file() and legacy.stat().st_size > 0:
+            content = legacy.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^- 地址：", content):
+                result.append((article_dir.name, legacy))
     return result
 
 
@@ -285,6 +325,36 @@ def merge_chart_markdowns(extract_root: Path, target: Path, sources=None):
     return target, len(sources)
 
 
+def merge_open_source_markdowns(extract_root: Path, target: Path, sources=None):
+    """Merge per-paper code/data availability reports."""
+    sources = find_open_source_markdowns(extract_root) if sources is None else sources
+    if not sources:
+        raise ValueError("未找到含可信地址的代码/数据可用性 Markdown")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    chunks = [
+        "# 代码与数据可用性汇总\n",
+        "> 来源：各论文 OpenSource/代码与数据可用性.md；DOI 不收录，结果需结合原文人工核验。\n",
+    ]
+    total_links = 0
+    for article_title, source in sources:
+        content = source.read_text(encoding="utf-8", errors="replace")
+        total_links += len(re.findall(r"(?m)^- 地址：", content))
+        content = _prepare_chart_markdown(content, source, target, extract_root)
+        chunks.append(f"\n## 【{article_title}】\n")
+        if content:
+            chunks.append(f"\n{content}\n")
+        else:
+            chunks.append("\n> 此代码/数据可用性报告为空。\n")
+
+    chunks.insert(
+        2,
+        f"> 共汇总 {len(sources)} 篇论文，识别到 {total_links} 个候选地址。\n",
+    )
+    target.write_text("\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+    return target, len(sources), total_links
+
+
 def merge_all_sections_and_charts_to_markdown(
     extract_root: Path,
     output_path: Path,
@@ -315,6 +385,56 @@ def merge_all_sections_and_charts_to_markdown(
         outputs.append(chart_output)
 
     return outputs, total_section_articles, len(grouped), chart_count
+
+
+def merge_all_sections_charts_and_code_to_markdown(
+    extract_root: Path,
+    output_path: Path,
+):
+    """Merge same-named sections, chart summaries, and code/data reports."""
+    grouped = find_sections(extract_root)
+    chart_sources = find_chart_markdowns(extract_root)
+    code_sources = find_open_source_markdowns(extract_root)
+    if not grouped and not chart_sources and not code_sources:
+        raise ValueError("未找到可合并的章节、图表或代码/数据可用性 Markdown")
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    outputs = []
+    total_section_articles = 0
+    if grouped:
+        section_outputs, total_section_articles = _write_section_markdowns(
+            grouped,
+            output_path,
+        )
+        outputs.extend(section_outputs)
+
+    chart_count = 0
+    if chart_sources:
+        chart_output, chart_count = merge_chart_markdowns(
+            extract_root,
+            output_path / "图表汇总_合并.md",
+            chart_sources,
+        )
+        outputs.append(chart_output)
+
+    code_source_count = 0
+    code_link_count = 0
+    if code_sources:
+        code_output, code_source_count, code_link_count = merge_open_source_markdowns(
+            extract_root,
+            output_path / "代码与数据可用性_合并.md",
+            code_sources,
+        )
+        outputs.append(code_output)
+
+    return (
+        outputs,
+        total_section_articles,
+        len(grouped),
+        chart_count,
+        code_source_count,
+        code_link_count,
+    )
 
 
 def _legacy_merge_all_sections_to_docx(extract_root: Path, output_path: Path):

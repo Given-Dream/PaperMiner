@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.5** · [下载 PaperMiner v1.4.5](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.5)
+当前版本：**v1.4.8** · [下载 PaperMiner v1.4.8](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.8)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -23,10 +23,38 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 公式提取 | 公式图片与 LaTeX 汇总 |
 | 章节归类 | `Abstract`、`Introduction`、`Methods`、`Results & Discussion`、`Conclusion` 等独立 Markdown |
 | 图表汇总 | 按原文顺序生成 Word 与 Markdown |
+| 代码与数据可用性 | 提取文末代码仓库和数据集超链接；只有可信地址才生成可核验 Markdown |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
 
-## v1.4.5 更新内容
+## v1.4.8 代码与数据可用性更新
+
+- 原“文末开源代码地址”升级为“代码与数据可用性”，同时识别 `Code availability`、`Data availability` 及中英文近义声明。
+- 支持 GitHub/GitLab/Gitee 等代码平台，以及 Zenodo、OSF、Figshare、Dataverse、Mendeley Data、Dryad、Kaggle、Hugging Face 等数据或归档平台；明确声明附近的其他网站超链接也可识别。
+- 同时扫描 MinerU Markdown、文末内容列表和原 PDF 最后最多 20 页的外部超链接注释，可恢复隐藏在“available here”等锚文本后的真实 URL。
+- `doi.org`、出版商 DOI 端点及 Elsevier `refhub/linkinghub` 参考文献跳转地址一律排除；换行/OCR 截断的仓库前缀会优先合并到 PDF 注释中的完整地址。
+- 已配置 DeepSeek 或 OpenAI 兼容接口时，只把发现的候选 URL 与局部上下文交给 LLM 分类；模型不能生成、改写或补全 URL。未配置或调用失败时自动使用本地规则。
+- 未找到可信地址时不再生成空 Markdown，只写 `OpenSource/availability_scan.json` 完成标记，避免“跳过已处理”反复扫描。
+- 有结果时生成 `OpenSource/代码与数据可用性.md`；合并后生成 `MergedSections/代码与数据可用性_合并.md`。旧版报告不会被自动删除，v2 空结果标记会阻止其进入新汇总。
+
+### v1.4.7 多 GPU 并行更新
+
+- 启动后在后台识别所有可用 NVIDIA CUDA 显卡，不再只使用系统默认的第一张卡。
+- 新增“GPU 并行设置”：可启用一张或多张显卡，并为每张卡设置 1–4 个 MinerU 任务槽；选择会保存在 `%LOCALAPPDATA%\PaperMiner\settings.json`。
+- 每个 MinerU 子进程通过 `CUDA_VISIBLE_DEVICES` 固定绑定到指定物理显卡，单卡模式、多卡模式和 CPU 模式均可使用。
+- 多卡批处理采用“GPU 解析队列 + 后处理队列”流水线；日志带有 `[GPU N][槽 M]` 前缀，任务看板统一统计完成、失败与跳过数量。
+- 点击“停止”会终止所有活动中的 MinerU 子进程；普通单篇失败不会中断剩余队列，运行环境级致命错误会停止尚未开始的任务。
+- 默认安全预设为每张已启用显卡 1 个任务。提高每卡任务数会近似成倍占用显存，应观察显存后逐级调整。
+
+### v1.4.6 开源地址更新
+
+- 新增“文末开源代码地址”选项，识别 GitHub、GitLab、Gitee、Bitbucket、Zenodo 等仓库或软件归档链接。
+- 每篇论文保存 `OpenSource/开源代码地址.md`，报告包含地址、置信度、识别来源和文末上下文；没有识别结果时仍会保存核查记录。
+- 默认排除参考文献列表，并要求普通归档地址附近出现代码可用性语义，降低引用链接误报。
+- 合并控件升级为“合并同名章节、图表和开源代码地址”，会生成跨论文的 `开源代码地址_合并.md`。
+- 旧输出缺少开源代码报告时，即使启用了“跳过已处理结果”，也会自动补提取。
+
+### v1.4.5 稳定性更新
 
 - 输入 PDF 目录和输出根目录均可在主界面选择，不再要求把论文复制到安装目录。
 - 路径选择会保存在 `%LOCALAPPDATA%\PaperMiner\settings.json`，更新软件后仍然有效。
@@ -72,8 +100,8 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.5 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.5)。
-2. 下载 `PaperMiner-v1.4.5-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
+1. 打开 [v1.4.8 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.8)。
+2. 下载 `PaperMiner-v1.4.8-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
 3. 双击安装包并选择安装目录。默认目录为：
 
    ```text
@@ -92,9 +120,10 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 1. 在“输入文件”区域点击“选择目录”，选择存放 PDF 的文件夹。
 2. 在“输出操作”区域点击“选择输出”，指定结果根目录；软件会在其中建立 `raw` 和 `extract`。
 3. 点击“刷新文件”，选择完整流程或仅提取已有 raw 结果。
-4. 勾选需要的文字、公式、图片、表格和章节功能。
-5. 点击“开始处理”，在右侧查看实时日志和任务统计。
-6. 从“打开 raw”或“打开 extract”进入输出目录。
+4. 完整流程启用 GPU 时，等待显卡识别完成，然后打开“GPU 并行设置”。单卡用户只启用一张卡；多卡用户可启用多张卡，建议先使用“全部 GPU：每卡 1 个任务”的安全预设。
+5. 勾选需要的文字、公式、图片、表格、章节和“代码与数据可用性”功能。
+6. 点击“开始处理”，确认对话框会显示 GPU 与任务槽计划；在右侧查看带显卡/任务槽标记的实时日志和任务统计。
+7. 从“打开 raw”或“打开 extract”进入输出目录。
 
 ## 界面与工作流
 
@@ -157,15 +186,19 @@ output/
    │  ├─ Tables/
    │  ├─ Formula/
    │  ├─ Sections/
+   │  ├─ OpenSource/
+   │  │  ├─ availability_scan.json
+   │  │  └─ 代码与数据可用性.md  # 仅在有可信地址时生成
    │  └─ Word/
    └─ MergedSections/
       ├─ [章节名]_合并.md
-      └─ 图表汇总_合并.md
+      ├─ 图表汇总_合并.md
+      └─ 代码与数据可用性_合并.md
 ```
 
 `Sections` 会保留论文中实际识别出的章节。不同论文结构并不总是固定为五章；若标题写法特殊、原始 Markdown 缺失或模型补充失败，请结合完整 Markdown 与实时日志人工核查。
 
-点击“合并同名章节和图表到 Markdown”后，同名章节按原规则分别汇总；图表则读取每篇论文 `Word` 文件夹中的 Markdown。生成的图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。
+点击“合并同名章节、图表和代码/数据地址”后，同名章节按原规则分别汇总；图表读取每篇论文 `Word` 文件夹中的 Markdown；代码与数据地址只汇总实际含可信链接的 `OpenSource/代码与数据可用性.md`。图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。LLM 只核验候选链接，不保证外部资源长期有效，访问、引用或运行前仍应结合论文原文人工确认。
 
 ## 重装与卸载
 
@@ -185,6 +218,7 @@ output/
 - 内存 8 GB 以上；CPU 处理建议 16 GB 以上
 - 可用磁盘空间至少 10 GB（环境、PyTorch、模型和输出会持续占用空间）
 - NVIDIA GPU 可选；没有可用 CUDA 时可以使用 CPU
+- 多张 CUDA 显卡可并行处理不同 PDF；默认每卡 1 个 MinerU 任务，增加任务数前应先观察单进程显存峰值
 - 首次安装和下载模型需要网络连接
 
 ## 从源码运行
@@ -231,6 +265,10 @@ $env:MINERU_MODEL_SOURCE = "modelscope"
 ### 章节数量比论文目录少
 
 PaperMiner 会归并同类标题，并且章节结果依赖 MinerU 生成的 Markdown。请先检查 `output/raw` 中标题是否完整，再查看实时日志确认是规则识别还是 LLM 补充；最终结果建议与原文人工核对。
+
+### 多张显卡只使用了一张，或调整后显存不足
+
+先确认主界面已完成 GPU 识别，再打开“GPU 并行设置”启用需要的显卡。日志中的 `[GPU N]` 是物理显卡编号，每个 MinerU 子进程只使用被分配的显卡。建议从每卡 1 个任务开始；出现 CUDA OOM、驱动重置或界面外的原生进程退出时，将对应显卡的任务数降回 1。不同型号显卡可以分别设置任务数，速度较慢或显存较小的卡不必启用。
 
 ## 数据与安全
 

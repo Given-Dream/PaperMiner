@@ -14,6 +14,7 @@ REQUIRED_MODULES = (
     "bs4",
     "docx",
     "lxml",
+    "pypdf",
     "requests",
     "dotenv",
     "ttkbootstrap",
