@@ -1,22 +1,27 @@
-# PaperMiner 1.4.8 软件版
+# PaperMiner 1.4.11 软件版
 
 ## 发布与安装
 
 正式发布包只有一个 `Setup.exe`。它内部包含完整程序载荷；不要从安装载荷目录手工复制 EXE。
 
 1. 双击 `Setup.exe`。
-2. 选择安装位置；默认位置是 `%LOCALAPPDATA%\Programs\PaperMiner`。也可选择 `D:\PaperMiner`、`E:\Apps\PaperMiner` 等任意可写的非 C 盘子目录，但不能直接选择磁盘根目录。
-3. 安装器解包后打开 PowerShell 日志窗口，完成 MinerU 环境安装或修复。
-4. 安装阶段不会自动启动主程序。
-5. 安装完成后，安装目录中才会出现 `PaperMiner.exe` 和 `Uninstall.exe`，桌面会生成 PaperMiner 快捷方式。
+2. 等待 Setup 自动检测现有 Conda。检测到时只显示复用路径；未检测到时才出现备用 Anaconda 安装位置。
+3. 选择 PaperMiner 安装位置；若出现 Anaconda 目录框，再由用户指定其位置。两个目录不能重叠或直接使用磁盘根目录。
+4. 安装器解包后打开 PowerShell 日志窗口；没有 Conda 时先从中国镜像下载并校验 Anaconda，再完成 MinerU 环境安装或修复。
+5. 安装阶段不会自动启动主程序。
+6. 安装完成后，安装目录中才会出现 `PaperMiner.exe` 和 `Uninstall.exe`，桌面会生成 PaperMiner 快捷方式。
 
-Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 通过 `conda env list --json` 获取环境的真实路径，不再假设环境必须位于 `<Conda根>\envs\MinerU`。
+Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 优先复用已有 Conda；新电脑没有 Conda 时，从三个中国镜像下载并校验 Anaconda 2026.07-1，再安装到用户在 Setup 中指定的独立目录。MinerU 环境路径来自 Conda JSON，不假设固定在 `<Conda根>\envs\MinerU`。
+
+自动下载约 1.04 GiB，SHA-256 必须等于 `b545f4bd8ab3bf32d99002a0779a887668ebfe479ee32ecbf060375670d5ee09`。PaperMiner 与 Anaconda 目录不能重叠；已有 Conda 时不会使用或创建备用 Anaconda 目录。
 
 ## 正常运行
 
 `PaperMiner.exe` 直接通过 `pythonw.exe` 启动 `scripts\batch_pdf_processor_gui.py`，主界面就是原“运行程序”打开的 GUI。
 
 - 正常启动不调用 PowerShell、`run.bat` 或 `运行程序.bat`，不会出现外部命令窗口。
+- `PaperMiner.exe` 持有单实例锁；双击或连续点击不会创建第二个 GUI。
+- 启动器在后台监护 GUI，并通过 Windows 作业对象保证 GUI 结束后回收仍存活的 MinerU 后代进程。
 - v1.4.3 会在无控制台启动时补建 UTF-8 标准输出流，兼容 MinerU 的 `doclayout_yolo` 日志初始化。
 - “代码与数据可用性”会识别文末代码仓库、数据集声明、可见 URL 和 PDF 隐藏超链接；`doi.org` 与出版商 DOI 端点不收录。
 - 已配置 LLM 时，只发送候选 URL 和局部上下文进行 `code / data / both / ignore` 分类，模型不能补写地址；未配置或调用失败时使用本地规则。
@@ -44,7 +49,7 @@ Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 通过 `conda
 - `重装`：仅移除名为 `MinerU` 的 Conda 环境，然后重新进入已安装的依赖安装阶段。
 - `卸载`：移除 `MinerU` 环境、运行记录、Windows 卸载登记和本程序桌面快捷方式。
 
-重装和卸载均保留模型缓存、项目源码、`.env`、`input`、`output` 与历史日志。应用目录不会被自动递归删除；确认数据后可由用户手工处理。
+重装和卸载均保留模型缓存、项目源码、`.env`、`input`、`output` 与历史日志。Setup 自动安装的 Anaconda 目录及其旁边的 `PaperMinerDownloads` 缓存也会保留，避免误删其他 Conda 环境或约 1.04 GiB 的可复用安装包。应用目录不会被自动递归删除；确认数据后可由用户手工处理。
 
 ## 数据安全
 

@@ -53,6 +53,18 @@ function Get-PaperMinerCondaRoots {
     $candidates = New-Object 'System.Collections.Generic.List[string]'
     $config = Get-PaperMinerRuntimeConfig -ProjectRoot $ProjectRoot
 
+    if (-not [string]::IsNullOrWhiteSpace($env:PAPERMINER_CONDA_ROOT)) {
+        Add-PaperMinerCandidate -List $candidates -Path $env:PAPERMINER_CONDA_ROOT
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PAPERMINER_CONDA_COMMAND)) {
+        $commandDirectory = Split-Path -Parent $env:PAPERMINER_CONDA_COMMAND
+        if ((Split-Path -Leaf $commandDirectory) -in @('Scripts', 'condabin')) {
+            Add-PaperMinerCandidate -List $candidates -Path (
+                Split-Path -Parent $commandDirectory)
+        }
+    }
+
     if ($null -ne $config -and $config.PSObject.Properties['CondaRoot']) {
         Add-PaperMinerCandidate -List $candidates -Path ([string]$config.CondaRoot)
     }
@@ -85,12 +97,39 @@ function Get-PaperMinerCondaRoots {
 
     foreach ($path in @(
             (Join-Path $env:USERPROFILE 'miniconda3'),
+            (Join-Path $env:USERPROFILE 'miniconda'),
             (Join-Path $env:USERPROFILE 'anaconda3'),
+            (Join-Path $env:USERPROFILE 'anaconda'),
             (Join-Path $env:LOCALAPPDATA 'miniconda3'),
+            (Join-Path $env:LOCALAPPDATA 'miniconda'),
             (Join-Path $env:LOCALAPPDATA 'anaconda3'),
+            (Join-Path $env:LOCALAPPDATA 'anaconda'),
             (Join-Path $env:ProgramData 'miniconda3'),
-            (Join-Path $env:ProgramData 'anaconda3'))) {
+            (Join-Path $env:ProgramData 'miniconda'),
+            (Join-Path $env:ProgramData 'anaconda3'),
+            (Join-Path $env:ProgramData 'anaconda'))) {
         Add-PaperMinerCandidate -List $candidates -Path $path
+    }
+
+    foreach ($registryPath in @(
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+        foreach ($entry in @(Get-ItemProperty `
+                -Path $registryPath `
+                -ErrorAction SilentlyContinue)) {
+            if ($null -eq $entry.PSObject.Properties['DisplayName'] -or
+                $null -eq $entry.PSObject.Properties['InstallLocation']) {
+                continue
+            }
+            $displayName = [string]$entry.DisplayName
+            if ($displayName -notmatch '(?i)(ana|mini)conda') {
+                continue
+            }
+            Add-PaperMinerCandidate `
+                -List $candidates `
+                -Path ([string]$entry.InstallLocation)
+        }
     }
 
     $userNames = New-Object 'System.Collections.Generic.List[string]'
@@ -102,7 +141,7 @@ function Get-PaperMinerCondaRoots {
     }
 
     foreach ($drive in Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue) {
-        foreach ($distribution in @('miniconda3', 'anaconda3')) {
+        foreach ($distribution in @('miniconda3', 'miniconda', 'anaconda3', 'anaconda')) {
             Add-PaperMinerCandidate -List $candidates -Path (Join-Path $drive.Root $distribution)
             foreach ($name in $userNames) {
                 Add-PaperMinerCandidate -List $candidates -Path (
@@ -169,6 +208,29 @@ function Get-PaperMinerCondaEnvironmentPaths {
     }
 
     return $environments
+}
+
+function Get-PaperMinerDefaultEnvironmentPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$CondaCommand,
+        [Parameter(Mandatory = $true)][string]$CondaRoot,
+        [string]$EnvironmentName = 'MinerU'
+    )
+
+    try {
+        $rawOutput = @(& $CondaCommand info --json 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            $info = ($rawOutput -join "`n") | ConvertFrom-Json
+            foreach ($environmentRoot in @($info.envs_dirs)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$environmentRoot)) {
+                    return Join-Path ([string]$environmentRoot) $EnvironmentName
+                }
+            }
+        }
+    }
+    catch {}
+
+    return Join-Path (Join-Path $CondaRoot 'envs') $EnvironmentName
 }
 
 function Test-PaperMinerCondaEnvironmentRegistration {

@@ -14,14 +14,21 @@ set "ENV_NAME=MinerU"
 :: ----------------------------------------
 :: Find Conda
 :: ----------------------------------------
-set "CONDA_BAT="
-set "CONDA_TEST="
-for /f "delims=" %%I in ('where conda.exe 2^>nul') do (
-    if not defined CONDA_TEST set "CONDA_TEST=%%~fI"
+set "CONDA_BAT=%PAPERMINER_CONDA_COMMAND%"
+if defined CONDA_BAT if not exist "%CONDA_BAT%" set "CONDA_BAT="
+if not defined CONDA_BAT if defined PAPERMINER_CONDA_ROOT (
+    if exist "%PAPERMINER_CONDA_ROOT%\condabin\conda.bat" set "CONDA_BAT=%PAPERMINER_CONDA_ROOT%\condabin\conda.bat"
+    if not defined CONDA_BAT if exist "%PAPERMINER_CONDA_ROOT%\Scripts\conda.exe" set "CONDA_BAT=%PAPERMINER_CONDA_ROOT%\Scripts\conda.exe"
 )
-if defined CONDA_TEST (
-    for %%F in ("!CONDA_TEST!") do (
-        for %%R in ("%%~dpF..") do set "CONDA_BAT=%%~fR\condabin\conda.bat"
+set "CONDA_TEST="
+if not defined CONDA_BAT (
+    for /f "delims=" %%I in ('where conda.exe 2^>nul') do (
+        if not defined CONDA_TEST set "CONDA_TEST=%%~fI"
+    )
+    if defined CONDA_TEST (
+        for %%F in ("!CONDA_TEST!") do (
+            for %%R in ("%%~dpF..") do set "CONDA_BAT=%%~fR\condabin\conda.bat"
+        )
     )
 )
 
@@ -64,8 +71,8 @@ if not defined CONDA_BAT (
 :conda_manual
 if not defined CONDA_BAT (
     if /i "%PAPERMINER_SETUP_MODE%"=="1" (
-        echo [ERROR] Conda was not found automatically.
-        echo Close Setup and make Conda available, then run Setup.exe again.
+        echo [ERROR] Setup did not provide a usable Conda command.
+        echo Review the earlier automatic Anaconda bootstrap messages.
         goto :failed
     )
     echo [WARNING] Conda not found automatically.
@@ -168,14 +175,20 @@ echo.
 echo [Step 1] Creating %ENV_NAME% environment (Python 3.12)...
 echo This may take a few minutes...
 echo.
-call "%CONDA_BAT%" create -n %ENV_NAME% python=3.12 -y
+if defined ENV_PATH (
+    call "%CONDA_BAT%" create --prefix "%ENV_PATH%" python=3.12 -y
+) else (
+    call "%CONDA_BAT%" create -n %ENV_NAME% python=3.12 -y
+)
 if errorlevel 1 (
     echo [ERROR] Failed to create environment!
     goto :failed
 )
 
-for /f "tokens=1,2*" %%a in ('call "%CONDA_BAT%" env list 2^>nul ^| findstr /C:"%ENV_NAME%"') do (
-    if "%%a"=="%ENV_NAME%" set "ENV_PATH=%%b"
+if not defined ENV_PATH (
+    for /f "tokens=1,2*" %%a in ('call "%CONDA_BAT%" env list 2^>nul ^| findstr /C:"%ENV_NAME%"') do (
+        if "%%a"=="%ENV_NAME%" set "ENV_PATH=%%b"
+    )
 )
 set "PYTHON_EXE=%ENV_PATH%\python.exe"
 

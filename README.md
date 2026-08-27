@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.8** · [下载 PaperMiner v1.4.8](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.8)
+当前版本：**v1.4.11** · [下载 PaperMiner v1.4.11](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.11)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -27,7 +27,31 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
 
-## v1.4.8 代码与数据可用性更新
+## v1.4.11 单实例与完整退出
+
+- `PaperMiner.exe` 使用当前 Windows 会话全局的单实例锁：双击、连续点击、重复启动或从另一份安装目录启动都只打开一个主界面。
+- 启动器在后台监护 GUI，并把 GUI 与 MinerU 后代进程纳入关闭即回收的 Windows 作业对象。
+- 关闭主界面时先禁止新 MinerU 进程创建，再终止已登记的整个进程树并等待退出；超时则强制结束。
+- “停止”按钮及多 GPU 环境级错误也使用相同清理流程，日志会记录清理与确认退出数量。
+
+## v1.4.10 安装前 Conda 检测
+
+- Setup 打开后先自动检测现有 Conda，检测完成前不会允许开始安装。
+- 检测到时只显示“将直接复用”的 Conda 根目录，Anaconda 安装位置不会出现。
+- 只有确认未检测到 Conda 或检测失败时，才显示 Anaconda 目录输入框和浏览按钮。
+- 支持“重新检测”；自动检测遗漏时，也可把出现的目录框指向现有 Conda 根目录。
+
+## v1.4.9 新电脑安装更新
+
+- Setup 增加独立的“Anaconda 安装位置”输入框和浏览按钮，PaperMiner 与 Anaconda 均由用户指定目录，且必须使用互不重叠的非磁盘根目录。
+- 优先复用系统中已经存在的 Miniconda/Anaconda，包括 F 盘等非标准路径及自定义 `envs_dirs`；不会重复安装。
+- 完全没有 Conda 时，从清华、北京外国语大学、南京大学三个中国镜像依次下载 `Anaconda3-2026.07-1-Windows-x86_64.exe`（约 1.04 GiB），静默安装到用户选择的目录后继续创建 MinerU 环境。
+- 下载完成后必须通过 Anaconda 官方 SHA-256 `b545f4bd8ab3bf32d99002a0779a887668ebfe479ee32ecbf060375670d5ee09` 才会执行；失败镜像自动切换，已验证安装包保留在所选目录旁的 `PaperMinerDownloads` 中供重试。
+- 新建 MinerU 环境使用 Conda JSON 报告的真实 `envs_dirs` 和明确的 `--prefix`，不再依赖易受空格影响的文本列解析。
+- Conda 检测同时读取 Windows 安装登记和常见目录别名；若自动检测仍遗漏，可在 Anaconda 目录框中直接选择现有 Conda 根目录，安装器会复用它。
+- 自动安装采用当前用户模式，不注册为系统 Python。继续安装即表示用户确认适用的 [Anaconda 服务条款](https://www.anaconda.com/legal/terms/terms-of-service)。
+
+### v1.4.8 代码与数据可用性更新
 
 - 原“文末开源代码地址”升级为“代码与数据可用性”，同时识别 `Code availability`、`Data availability` 及中英文近义声明。
 - 支持 GitHub/GitLab/Gitee 等代码平台，以及 Zenodo、OSF、Figshare、Dataverse、Mendeley Data、Dryad、Kaggle、Hugging Face 等数据或归档平台；明确声明附近的其他网站超链接也可识别。
@@ -94,24 +118,31 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ## 快速安装
 
-### 1. 准备 Conda
+### 1. 选择安装目录
 
-安装 [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) 或 Anaconda。推荐 Python 3.12；安装位置可以在 C、D、E 等任意磁盘。
+不再要求预先安装 Conda。Setup 会先复用已有 Miniconda/Anaconda；若没有，则自动从中国镜像下载并安装 Anaconda。
+
+Setup 中分别指定：
+
+- PaperMiner 程序目录，例如 `D:\Apps\PaperMiner`。
+- Anaconda 目录，例如 `D:\Runtime\Anaconda3`。已有 Conda 时该项不会被使用。
+
+两个目录不能互相包含，也不能直接选择 `D:\` 之类的磁盘根目录。路径不要包含 `!` 或 `%`。
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.8 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.8)。
-2. 下载 `PaperMiner-v1.4.8-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
-3. 双击安装包并选择安装目录。默认目录为：
+1. 打开 [v1.4.11 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.11)。
+2. 下载 `PaperMiner-v1.4.11-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
+3. 双击安装包。Setup 会先检测现有 Conda；未检测到时才显示备用 Anaconda 安装目录。PaperMiner 默认目录为：
 
    ```text
    %LOCALAPPDATA%\Programs\PaperMiner
    ```
 
-4. 安装阶段会打开日志窗口，检查 Conda、安装或修复依赖，并记录可用的 MinerU 运行环境。首次安装还可能下载 PyTorch 和 MinerU 模型，需要较长时间与数 GB 磁盘空间。
+4. 安装阶段会打开日志窗口。若没有 Conda，会先下载约 1.04 GiB 的 Anaconda 并校验 SHA-256；随后安装或修复依赖，并记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
 5. 安装完成后，从桌面快捷方式或安装目录中的 `PaperMiner.exe` 启动。
 
-安装目录可以选择 `D:\PaperMiner`、`E:\Apps\PaperMiner` 等非 C 盘位置，但不能直接选择 `D:\` 这类磁盘根目录。Conda 与 `MinerU` 环境也可以分处不同磁盘。
+两个安装目录均可放在 C、D、E、F 等任意可写盘符。已有 Conda 与 `MinerU` 环境也可以分处不同磁盘。
 
 > PowerShell 只在安装、重装和卸载阶段使用。正常运行 PaperMiner 时，日志直接显示在软件界面中，并同步写入 `logs\PaperMiner_*.log`。
 
@@ -208,15 +239,15 @@ output/
 - **重装**：重建名为 `MinerU` 的 Conda 环境并重新安装依赖。
 - **卸载**：移除程序登记、桌面快捷方式和对应 Conda 环境。
 
-重装与卸载会保留模型缓存、`.env`、`input`、`output` 和历史日志；确认数据无误后，再由用户手工清理不再需要的目录。
+重装与卸载会保留模型缓存、`.env`、`input`、`output` 和历史日志。若 Setup 曾自动安装 Anaconda，其安装目录以及旁边的 `PaperMinerDownloads` 安装包缓存也不会被 PaperMiner 卸载器删除；确认数据和其他 Conda 环境无误后，再由用户手工清理。
 
 ## 系统要求
 
 - Windows 10 或 Windows 11（64 位）
-- Miniconda 或 Anaconda
+- Conda 可选：已有 Miniconda/Anaconda 会复用；没有时由 Setup 从中国镜像安装 Anaconda
 - Python 3.12（推荐）
 - 内存 8 GB 以上；CPU 处理建议 16 GB 以上
-- 可用磁盘空间至少 10 GB（环境、PyTorch、模型和输出会持续占用空间）
+- 新电脑建议至少 15 GB 可用空间（Anaconda、环境、PyTorch、模型和输出会持续占用空间）
 - NVIDIA GPU 可选；没有可用 CUDA 时可以使用 CPU
 - 多张 CUDA 显卡可并行处理不同 PDF；默认每卡 1 个 MinerU 任务，增加任务数前应先观察单进程显存峰值
 - 首次安装和下载模型需要网络连接

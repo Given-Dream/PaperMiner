@@ -60,7 +60,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.8"
+    __version__ = "1.4.11"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -1128,18 +1128,18 @@ class BatchPDFProcessorGUI:
     def _on_close(self):
         if self.is_processing and not messagebox.askyesno(
             "任务仍在运行",
-            "当前 PDF 可能仍在 MinerU 中处理。强制关闭会中断本篇输出，确认退出吗？",
+            "当前 PDF 可能仍在 MinerU 中处理。关闭应用会终止全部 MinerU 进程并中断本篇输出，确认退出吗？",
             parent=self.root,
         ):
             return
+        self._closing = True
         self.is_processing = False
         self._terminate_active_mineru()
-        self._closing = True
         self._close_log_file()
         self.root.destroy()
 
-    def _terminate_active_mineru(self):
-        """终止全部活动 MinerU 隔离进程。"""
+    def _terminate_active_mineru(self, wait_timeout: float = 5.0):
+        """终止、等待并确认回收全部已跟踪的 MinerU 进程树。"""
         lock = getattr(self, "_mineru_process_lock", None)
         if lock is None:
             lock = threading.RLock()
@@ -1151,16 +1151,72 @@ class BatchPDFProcessorGUI:
             if legacy_process is not None and legacy_process not in processes:
                 processes.append(legacy_process)
 
-        stopped = 0
+        requested = 0
+        confirmed = 0
         for process in processes:
             try:
+                if process.poll() is not None:
+                    confirmed += 1
+                    continue
+
+                requested += 1
+                pid = getattr(process, "pid", None)
+                if sys.platform == "win32" and isinstance(pid, int) and pid > 0:
+                    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    try:
+                        subprocess.run(
+                            ("taskkill", "/PID", str(pid), "/T", "/F"),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=max(2.0, float(wait_timeout)),
+                            check=False,
+                            creationflags=creation_flags,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        # taskkill 不可用时仍回退到 Popen 的精确进程句柄。
+                        pass
+
                 if process.poll() is None:
                     process.terminate()
-                    stopped += 1
-            except (OSError, ProcessLookupError) as exc:
+                wait_method = getattr(process, "wait", None)
+                if callable(wait_method) and process.poll() is None:
+                    try:
+                        wait_method(timeout=max(0.1, float(wait_timeout)))
+                    except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+                        pass
+                if process.poll() is None:
+                    kill_method = getattr(process, "kill", None)
+                    if callable(kill_method):
+                        kill_method()
+                    if callable(wait_method):
+                        try:
+                            wait_method(timeout=2.0)
+                        except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+                            pass
+                if process.poll() is not None:
+                    confirmed += 1
+            except (OSError, ProcessLookupError, ValueError) as exc:
                 self.log(f"停止 MinerU 隔离进程时出现提示: {exc}")
-        if stopped:
-            self.log(f"已向 {stopped} 个活动 MinerU 隔离进程发送停止请求。")
+
+        with lock:
+            active = getattr(self, "_active_mineru_processes", {})
+            for process_key, process in list(active.items()):
+                try:
+                    finished = process.poll() is not None
+                except (OSError, ProcessLookupError):
+                    finished = True
+                if finished:
+                    active.pop(process_key, None)
+            remaining = list(active.values())
+            self._mineru_process = remaining[-1] if remaining else None
+
+        if requested:
+            self.log(
+                f"MinerU 关闭清理完成: 已处理 {requested} 个活动进程，"
+                f"已确认退出 {confirmed} 个。"
+            )
+        return confirmed
 
     def _register_mineru_process(self, job_id, process) -> str:
         lock = getattr(self, "_mineru_process_lock", None)
@@ -3246,18 +3302,29 @@ class BatchPDFProcessorGUI:
             if sys.platform == "win32":
                 creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                env=worker_env,
-                creationflags=creation_flags,
-            )
-            process_key = self._register_mineru_process(job_id, process)
+            process_lock = getattr(self, "_mineru_process_lock", None)
+            if process_lock is None:
+                process_lock = threading.RLock()
+                self._mineru_process_lock = process_lock
+            with process_lock:
+                if (
+                    getattr(self, "_closing", False)
+                    or not getattr(self, "is_processing", True)
+                ):
+                    self.log("任务已停止，未再启动新的 MinerU 进程。")
+                    return None
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    env=worker_env,
+                    creationflags=creation_flags,
+                )
+                process_key = self._register_mineru_process(job_id, process)
             if process.stdout is not None:
                 for raw_line in process.stdout:
                     line = raw_line.rstrip("\r\n")
@@ -5876,7 +5943,7 @@ def main():
         messagebox.showerror(
             'PaperMiner 缺少界面依赖',
             '未检测到 ttkbootstrap。\n\n'
-            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.8 依赖。\n\n'
+            '请先运行 Setup.exe 或“清理重装”，安装 PaperMiner v1.4.11 依赖。\n\n'
             f'详细信息：{_TTKBOOTSTRAP_IMPORT_ERROR}',
             parent=root,
         )
