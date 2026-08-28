@@ -137,6 +137,114 @@ function Save-PaperMinerCondaHint {
     }
 }
 
+function Get-PaperMinerInstalledProjectRoots {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $roots = New-Object 'System.Collections.Generic.List[string]'
+    Add-PaperMinerCandidate -List $roots -Path $ProjectRoot
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PAPERMINER_PROJECT_ROOT)) {
+        Add-PaperMinerCandidate -List $roots -Path $env:PAPERMINER_PROJECT_ROOT
+    }
+
+    foreach ($registryPath in @(
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaperMiner',
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaperMiner',
+            'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\PaperMiner')) {
+        try {
+            $entry = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+            if ($null -ne $entry.PSObject.Properties['InstallLocation']) {
+                Add-PaperMinerCandidate `
+                    -List $roots `
+                    -Path ([string]$entry.InstallLocation)
+            }
+        }
+        catch {}
+    }
+
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData)
+    if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+        Add-PaperMinerCandidate `
+            -List $roots `
+            -Path (Join-Path $localAppData 'Programs\PaperMiner')
+    }
+
+    return $roots
+}
+
+function Get-PaperMinerSetupCondaRoots {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $candidates = New-Object 'System.Collections.Generic.List[string]'
+
+    # Setup detection intentionally has a short, deterministic priority list:
+    # explicit paths first, then PaperMiner's persisted configuration. It does
+    # not silently crawl disks; the GUI offers a separate full-disk search.
+    foreach ($path in @(
+            $env:PAPERMINER_CONDA_INSTALL_ROOT,
+            $env:PAPERMINER_CONDA_ROOT)) {
+        Add-PaperMinerCandidate -List $candidates -Path $path
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PAPERMINER_CONDA_COMMAND)) {
+        $commandDirectory = Split-Path -Parent $env:PAPERMINER_CONDA_COMMAND
+        if ((Split-Path -Leaf $commandDirectory) -in @('Scripts', 'condabin')) {
+            Add-PaperMinerCandidate `
+                -List $candidates `
+                -Path (Split-Path -Parent $commandDirectory)
+        }
+    }
+
+    foreach ($installedRoot in Get-PaperMinerInstalledProjectRoots `
+            -ProjectRoot $ProjectRoot) {
+        $config = Get-PaperMinerRuntimeConfig -ProjectRoot $installedRoot
+        if ($null -ne $config -and $config.PSObject.Properties['CondaRoot']) {
+            Add-PaperMinerCandidate `
+                -List $candidates `
+                -Path ([string]$config.CondaRoot)
+        }
+    }
+
+    foreach ($hintRoot in Get-PaperMinerCondaHintRoots -ProjectRoot $ProjectRoot) {
+        Add-PaperMinerCandidate -List $candidates -Path $hintRoot
+    }
+
+    return $candidates
+}
+
+function Find-PaperMinerCondaAtRoot {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $roots = New-Object 'System.Collections.Generic.List[string]'
+    Add-PaperMinerCandidate -List $roots -Path $Root
+    foreach ($candidate in $roots) {
+        $condaBat = Join-Path $candidate 'condabin\conda.bat'
+        $condaExe = Join-Path $candidate 'Scripts\conda.exe'
+        if (Test-Path -LiteralPath $condaBat -PathType Leaf) {
+            return [pscustomobject]@{ Root = $candidate; Command = $condaBat }
+        }
+        if (Test-Path -LiteralPath $condaExe -PathType Leaf) {
+            return [pscustomobject]@{ Root = $candidate; Command = $condaExe }
+        }
+    }
+
+    return $null
+}
+
+function Find-PaperMinerSetupConda {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    foreach ($root in Get-PaperMinerSetupCondaRoots -ProjectRoot $ProjectRoot) {
+        $conda = Find-PaperMinerCondaAtRoot -Root $root
+        if ($null -ne $conda) {
+            return $conda
+        }
+    }
+
+    return $null
+}
+
 function Get-PaperMinerCondaRoots {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 

@@ -22,16 +22,25 @@ try { $Host.UI.RawUI.WindowTitle = 'PaperMiner Setup' } catch {}
 . (Join-Path $projectRoot 'PaperMiner.AnacondaBootstrap.ps1')
 
 if ($DetectCondaOnly) {
-    $detectedConda = Find-PaperMinerConda -ProjectRoot $projectRoot
-    if ($null -eq $detectedConda) {
+    $detectedAnyConda = $false
+    foreach ($candidateRoot in Get-PaperMinerSetupCondaRoots `
+            -ProjectRoot $projectRoot) {
+        $detectedConda = Find-PaperMinerCondaAtRoot -Root $candidateRoot
+        if ($null -eq $detectedConda) {
+            continue
+        }
+
+        $detectedAnyConda = $true
+        $rootBytes = [System.Text.Encoding]::UTF8.GetBytes(
+            [string]$detectedConda.Root)
+        Write-Output ('PAPERMINER_CONDA_ROOT_BASE64={0}' -f
+            [Convert]::ToBase64String($rootBytes))
+    }
+
+    if (-not $detectedAnyConda) {
         Write-Output 'PAPERMINER_CONDA_NOT_FOUND'
         exit 3
     }
-
-    $rootBytes = [System.Text.Encoding]::UTF8.GetBytes(
-        [string]$detectedConda.Root)
-    Write-Output ('PAPERMINER_CONDA_ROOT_BASE64={0}' -f
-        [Convert]::ToBase64String($rootBytes))
     exit 0
 }
 
@@ -68,7 +77,14 @@ try {
     Write-SetupLog '========================================'
 
     $existingRuntime = Find-PaperMinerRuntime -ProjectRoot $projectRoot
-    $conda = Find-PaperMinerConda -ProjectRoot $projectRoot
+    if ($AllowAnacondaBootstrap -and
+        -not [string]::IsNullOrWhiteSpace($env:PAPERMINER_CONDA_INSTALL_ROOT)) {
+        $conda = Find-PaperMinerCondaAtRoot `
+            -Root $env:PAPERMINER_CONDA_INSTALL_ROOT
+    }
+    else {
+        $conda = Find-PaperMinerConda -ProjectRoot $projectRoot
+    }
     if ($null -eq $conda) {
         if ($env:PAPERMINER_DISABLE_AUTO_CONDA -eq '1' -or
             (-not $AllowAnacondaBootstrap -and
@@ -134,7 +150,7 @@ try {
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = Join-Path $projectRoot 'PaperMiner.exe'
     $shortcut.WorkingDirectory = $projectRoot
-    $shortcut.Description = 'PaperMiner 1.4.12'
+    $shortcut.Description = 'PaperMiner 1.4.13'
     $shortcut.Save()
     Write-SetupLog ('Desktop shortcut: {0}' -f $shortcutPath)
 
