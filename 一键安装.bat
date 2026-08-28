@@ -175,10 +175,11 @@ echo.
 echo [Step 1] Creating %ENV_NAME% environment (Python 3.12)...
 echo This may take a few minutes...
 echo.
+echo Using conda-forge with --override-channels to avoid unaccepted Anaconda default-channel terms.
 if defined ENV_PATH (
-    call "%CONDA_BAT%" create --prefix "%ENV_PATH%" python=3.12 -y
+    call "%CONDA_BAT%" create --prefix "%ENV_PATH%" --override-channels -c conda-forge python=3.12 -y
 ) else (
-    call "%CONDA_BAT%" create -n %ENV_NAME% python=3.12 -y
+    call "%CONDA_BAT%" create -n %ENV_NAME% --override-channels -c conda-forge python=3.12 -y
 )
 if errorlevel 1 (
     echo [ERROR] Failed to create environment!

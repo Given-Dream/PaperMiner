@@ -47,11 +47,105 @@ function Get-PaperMinerRuntimeConfig {
     }
 }
 
+function Get-PaperMinerCondaHintFiles {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $files = New-Object 'System.Collections.Generic.List[string]'
+    $hintFileOverride = [string]$env:PAPERMINER_CONDA_HINT_FILE
+    if (-not [string]::IsNullOrWhiteSpace($hintFileOverride)) {
+        try {
+            $files.Add([System.IO.Path]::GetFullPath(
+                [Environment]::ExpandEnvironmentVariables($hintFileOverride)))
+        }
+        catch {}
+    }
+    else {
+        $localAppData = [Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::LocalApplicationData)
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            $files.Add((Join-Path $localAppData 'PaperMiner\conda-root.txt'))
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ProjectRoot)) {
+        try {
+            $files.Add((Join-Path -Path ([System.IO.Path]::GetFullPath($ProjectRoot)) `
+                -ChildPath '.paperminer-conda-root'))
+        }
+        catch {}
+    }
+
+    return $files
+}
+
+function Get-PaperMinerCondaHintRoots {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $roots = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($hintFile in Get-PaperMinerCondaHintFiles -ProjectRoot $ProjectRoot) {
+        if (-not (Test-Path -LiteralPath $hintFile -PathType Leaf)) {
+            continue
+        }
+
+        try {
+            $hint = (Get-Content -LiteralPath $hintFile -Raw -Encoding UTF8).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($hint)) {
+                Add-PaperMinerCandidate -List $roots -Path $hint
+            }
+        }
+        catch {}
+    }
+
+    return $roots
+}
+
+function Save-PaperMinerCondaHint {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$CondaRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CondaRoot)) {
+        return
+    }
+
+    try {
+        $fullRoot = [System.IO.Path]::GetFullPath(
+            [Environment]::ExpandEnvironmentVariables($CondaRoot)).TrimEnd('\')
+        $hintFiles = @(Get-PaperMinerCondaHintFiles -ProjectRoot $ProjectRoot)
+        if ($hintFiles.Count -eq 0) {
+            return
+        }
+
+        # Keep a per-user hint outside the install directory so a failed first
+        # setup can still be repaired by a later Setup.exe in another folder.
+        $hintPath = $hintFiles[0]
+        $hintDirectory = Split-Path -Parent $hintPath
+        if (-not (Test-Path -LiteralPath $hintDirectory -PathType Container)) {
+            New-Item -ItemType Directory -Path $hintDirectory -Force | Out-Null
+        }
+        $temporaryPath = '{0}.tmp.{1}' -f $hintPath, $PID
+        [System.IO.File]::WriteAllText(
+            $temporaryPath,
+            $fullRoot + [Environment]::NewLine,
+            (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temporaryPath -Destination $hintPath -Force
+    }
+    catch {
+        # A hint is an optimization only; never make dependency setup fail
+        # because the user profile is read-only or being cleaned concurrently.
+    }
+}
+
 function Get-PaperMinerCondaRoots {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
     $candidates = New-Object 'System.Collections.Generic.List[string]'
     $config = Get-PaperMinerRuntimeConfig -ProjectRoot $ProjectRoot
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PAPERMINER_CONDA_INSTALL_ROOT)) {
+        Add-PaperMinerCandidate -List $candidates -Path $env:PAPERMINER_CONDA_INSTALL_ROOT
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($env:PAPERMINER_CONDA_ROOT)) {
         Add-PaperMinerCandidate -List $candidates -Path $env:PAPERMINER_CONDA_ROOT
@@ -67,6 +161,10 @@ function Get-PaperMinerCondaRoots {
 
     if ($null -ne $config -and $config.PSObject.Properties['CondaRoot']) {
         Add-PaperMinerCandidate -List $candidates -Path ([string]$config.CondaRoot)
+    }
+
+    foreach ($hintRoot in Get-PaperMinerCondaHintRoots -ProjectRoot $ProjectRoot) {
+        Add-PaperMinerCandidate -List $candidates -Path $hintRoot
     }
 
     if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
@@ -143,6 +241,10 @@ function Get-PaperMinerCondaRoots {
     foreach ($drive in Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue) {
         foreach ($distribution in @('miniconda3', 'miniconda', 'anaconda3', 'anaconda')) {
             Add-PaperMinerCandidate -List $candidates -Path (Join-Path $drive.Root $distribution)
+            foreach ($programDirectory in @('Program Files', 'Program Files (x86)')) {
+                Add-PaperMinerCandidate -List $candidates -Path (
+                    Join-Path $drive.Root (Join-Path $programDirectory $distribution))
+            }
             foreach ($name in $userNames) {
                 Add-PaperMinerCandidate -List $candidates -Path (
                     Join-Path $drive.Root (Join-Path 'soft' (Join-Path $name $distribution)))

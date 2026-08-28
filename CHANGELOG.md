@@ -1,5 +1,15 @@
 # PaperMiner 更新日志
 
+## v1.4.12 (2026-08-28)
+
+- 修复 Setup 在第一次安装指定了自定义 Anaconda/Miniconda 目录后，下一次运行无法自动找回该目录的问题；每用户保存 Conda 根目录提示，安装失败后也会保留。
+- 自动检测补充各磁盘 `Program Files\Anaconda3`、`Miniconda3` 等常见路径，并支持从用户选定的父目录检查标准子目录。
+- 自动检测不到时不再直接下载：Setup 先要求用户指定目录并点击“检测此目录”；只有勾选确认本机没有 Conda 后，才启用多镜像 Anaconda 下载。
+- 修复新安装 Anaconda 后创建 MinerU 环境时的 `CondaToSNonInteractiveError`；创建环境使用 `conda-forge --override-channels`，避免依赖 Anaconda 默认频道服务条款状态。
+- 安装日志记录复用现有 Conda、人工复检和镜像下载分支，便于在另一台电脑定位问题。
+
+---
+
 ## v1.4.11 (2026-08-26)
 
 - `PaperMiner.exe` 增加当前 Windows 会话全局的单实例互斥锁；双击、连续点击、重复启动或从另一份安装目录启动都只保留首个 GUI 进程。

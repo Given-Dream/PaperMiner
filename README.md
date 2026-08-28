@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.11** · [下载 PaperMiner v1.4.11](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.11)
+当前版本：**v1.4.12** · [下载 PaperMiner v1.4.12](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.12)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -33,6 +33,14 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 - 启动器在后台监护 GUI，并把 GUI 与 MinerU 后代进程纳入关闭即回收的 Windows 作业对象。
 - 关闭主界面时先禁止新 MinerU 进程创建，再终止已登记的整个进程树并等待退出；超时则强制结束。
 - “停止”按钮及多 GPU 环境级错误也使用相同清理流程，日志会记录清理与确认退出数量。
+
+## v1.4.12 Conda 检测与无 Conda 安装修复
+
+- Conda 检测现在会读取每用户的持久化路径提示、旧 PaperMiner 配置，并补充扫描各磁盘的 `Program Files\Anaconda3`、`Miniconda3` 等常见位置；首次安装失败后再次运行 Setup 也能复用已指定的 Conda。
+- 自动检测不到时，Setup 不会直接下载或覆盖目录：先由用户指定 Conda 根目录并点击“检测此目录”；只有勾选“我确认本机没有 Conda”后才允许下载。
+- 用户指定的目录支持选择父目录并检查标准 Anaconda/Miniconda 子目录；验证通过后直接复用，不重复下载。
+- 确认没有 Conda 后，安装器按清华、北外、南大镜像顺序下载并校验 Anaconda；失败镜像会自动切换，已验证安装包保留供重试。
+- 创建 MinerU 环境时使用 `conda-forge --override-channels`，不再因 Anaconda 默认频道未接受服务条款而中途失败；安装日志会记录实际路径和处理分支。
 
 ## v1.4.10 安装前 Conda 检测
 
@@ -120,26 +128,26 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 1. 选择安装目录
 
-不再要求预先安装 Conda。Setup 会先复用已有 Miniconda/Anaconda；若没有，则自动从中国镜像下载并安装 Anaconda。
+不再要求预先安装 Conda。Setup 会先复用已有 Miniconda/Anaconda；自动检测不到时，先由用户指定目录并复检，只有确认没有 Conda 才从中国镜像下载并安装 Anaconda。
 
 Setup 中分别指定：
 
 - PaperMiner 程序目录，例如 `D:\Apps\PaperMiner`。
-- Anaconda 目录，例如 `D:\Runtime\Anaconda3`。已有 Conda 时该项不会被使用。
+- 已有 Conda 根目录（自动检测不到时填写，例如 `D:\Program Files\Anaconda3`）；确认没有 Conda 后，该字段改作 Anaconda 下载安装目录。
 
 两个目录不能互相包含，也不能直接选择 `D:\` 之类的磁盘根目录。路径不要包含 `!` 或 `%`。
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.11 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.11)。
-2. 下载 `PaperMiner-v1.4.11-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
-3. 双击安装包。Setup 会先检测现有 Conda；未检测到时才显示备用 Anaconda 安装目录。PaperMiner 默认目录为：
+1. 打开 [v1.4.12 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.12)。
+2. 下载 `PaperMiner-v1.4.12-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
+3. 双击安装包。Setup 会先检测现有 Conda；未检测到时先指定并检测目录，确认没有 Conda 后才进入备用 Anaconda 下载流程。PaperMiner 默认目录为：
 
    ```text
    %LOCALAPPDATA%\Programs\PaperMiner
    ```
 
-4. 安装阶段会打开日志窗口。若没有 Conda，会先下载约 1.04 GiB 的 Anaconda 并校验 SHA-256；随后安装或修复依赖，并记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
+4. 安装阶段会打开日志窗口。确认没有 Conda 后，安装器会从多个中国镜像下载约 1.04 GiB 的 Anaconda 并校验 SHA-256；随后使用 `conda-forge --override-channels` 创建环境并安装依赖，记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
 5. 安装完成后，从桌面快捷方式或安装目录中的 `PaperMiner.exe` 启动。
 
 两个安装目录均可放在 C、D、E、F 等任意可写盘符。已有 Conda 与 `MinerU` 环境也可以分处不同磁盘。
@@ -259,7 +267,7 @@ Windows 用户优先使用 Release 安装包。开发或调试时可执行：
 ```powershell
 git clone https://github.com/Given-Dream/PaperMiner.git
 cd PaperMiner
-conda create -n MinerU python=3.12 -y
+conda create -n MinerU --override-channels -c conda-forge python=3.12 -y
 conda activate MinerU
 pip install -U "mineru[core]>=3.1.0,<4.0"
 pip install -r requirements.txt

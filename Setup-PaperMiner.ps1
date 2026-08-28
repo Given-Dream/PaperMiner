@@ -2,6 +2,7 @@ param(
     [switch]$CheckOnly,
     [switch]$Bootstrap,
     [switch]$DetectCondaOnly,
+    [switch]$AllowAnacondaBootstrap,
     [string]$CondaInstallRoot
 )
 
@@ -69,8 +70,12 @@ try {
     $existingRuntime = Find-PaperMinerRuntime -ProjectRoot $projectRoot
     $conda = Find-PaperMinerConda -ProjectRoot $projectRoot
     if ($null -eq $conda) {
-        if ($env:PAPERMINER_DISABLE_AUTO_CONDA -eq '1') {
-            throw 'Conda was not found and automatic Anaconda installation is disabled.'
+        if ($env:PAPERMINER_DISABLE_AUTO_CONDA -eq '1' -or
+            (-not $AllowAnacondaBootstrap -and
+            $env:PAPERMINER_ALLOW_AUTO_CONDA -ne '1')) {
+            throw (
+                'Conda was not found. Select an existing Conda directory and verify it, ' +
+                'or confirm that Conda is not installed before allowing Anaconda download.')
         }
         $bootstrapConfig = Get-PaperMinerAnacondaBootstrapConfig `
             -ProjectRoot $projectRoot
@@ -81,6 +86,7 @@ try {
 
     $env:PAPERMINER_CONDA_ROOT = $conda.Root
     $env:PAPERMINER_CONDA_COMMAND = $conda.Command
+    Save-PaperMinerCondaHint -ProjectRoot $projectRoot -CondaRoot $conda.Root
     Write-SetupLog ('Conda root: {0}' -f $conda.Root)
     Write-SetupLog ('Conda command: {0}' -f $conda.Command)
 
@@ -128,7 +134,7 @@ try {
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = Join-Path $projectRoot 'PaperMiner.exe'
     $shortcut.WorkingDirectory = $projectRoot
-    $shortcut.Description = 'PaperMiner 1.4.11'
+    $shortcut.Description = 'PaperMiner 1.4.12'
     $shortcut.Save()
     Write-SetupLog ('Desktop shortcut: {0}' -f $shortcutPath)
 
