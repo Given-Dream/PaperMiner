@@ -1,5 +1,16 @@
 # PaperMiner 更新日志
 
+## v1.4.15 (2026-08-29)
+
+- Anaconda 来源增加官方 `repo.anaconda.com`，与清华、北外、南大镜像一起读取 1 MiB 短样本测速，按实测速度排序；下载源失败或持续低于阈值时自动切换。
+- 新增普通 PyPI 五源并行测速：清华、阿里云、中科大、腾讯与 PyPI 官方。MinerU 和常规依赖使用最快的单一索引，镜像缺包或未同步时回退官方 PyPI。
+- PyTorch CUDA wheel 继续从 PyTorch 官方索引获取，并允许通用依赖从测速选出的 PyPI 源下载，避免全部小 wheel 固定经过慢速链路。
+- GPU 检测日志新增全部 NVIDIA 显卡的索引、型号、显存和驱动；修复 GPU 名称回显命令产生“找不到文件”的引号错误。
+- 安装后的验证显示 PyTorch 版本、CUDA runtime、cuDNN 版本、CUDA 设备数和每张设备名称。
+- 明确不为二进制 PyTorch 单独安装 CUDA Toolkit/cuDNN，也不静默安装系统显卡驱动；驱动未就绪时使用 CPU 版并提供 NVIDIA 官方驱动入口。
+
+---
+
 ## v1.4.14 (2026-08-29)
 
 - Setup 快速自动检查未从明确路径或 PaperMiner 已保存配置找到 Conda 后，立即允许勾选“我确认本机没有 Conda”。

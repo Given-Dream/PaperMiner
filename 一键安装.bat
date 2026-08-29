@@ -210,7 +210,28 @@ if not defined PYTHONIOENCODING (
 :: Force pip to install into the Conda environment, even if pip user config says --user.
 set "PIP_USER=0"
 set "PIP_NO_USER=1"
-set "PIP_CMD=%PYTHON_EXE% -m pip"
+set PIP_CMD="%PYTHON_EXE%" -m pip --isolated
+set "PIP_INDEX_URL=https://pypi.org/simple"
+set "PIP_SOURCE_NAME=PyPI official (fallback)"
+set "PIP_PROBE_MIBPS=0"
+set "PIP_SOURCE_FILE=%TEMP%\paperminer_pip_source_%RANDOM%_%RANDOM%.txt"
+if exist "scripts\select_pip_source.py" (
+    "%PYTHON_EXE%" "scripts\select_pip_source.py" --output "!PIP_SOURCE_FILE!"
+    if exist "!PIP_SOURCE_FILE!" (
+        for /f "usebackq tokens=1,* delims==" %%a in ("!PIP_SOURCE_FILE!") do (
+            if /i "%%a"=="PIP_SOURCE_NAME" set "PIP_SOURCE_NAME=%%b"
+            if /i "%%a"=="PIP_INDEX_URL" set "PIP_INDEX_URL=%%b"
+            if /i "%%a"=="PIP_PROBE_MIBPS" set "PIP_PROBE_MIBPS=%%b"
+        )
+        del "!PIP_SOURCE_FILE!" >nul 2>nul
+    )
+) else (
+    echo [WARNING] PyPI source selector is missing; using official PyPI.
+)
+set "PIP_COMMON_ARGS=--index-url !PIP_INDEX_URL! --timeout 60 --retries 4 --prefer-binary"
+set "PIP_OFFICIAL_ARGS=--index-url https://pypi.org/simple --timeout 90 --retries 5 --prefer-binary"
+echo   General Python package source: !PIP_SOURCE_NAME! [!PIP_INDEX_URL!]
+echo   Probe speed: !PIP_PROBE_MIBPS! MiB/s
 
 :: Check write permission to conda env directory
 echo __test__ > "%ENV_PATH%\__permtest__" 2>nul
@@ -239,6 +260,8 @@ set "HAS_GPU=0"
 set "CUDA_VER="
 set "DRIVER_VER="
 set "NVIDIA_SMI="
+set "GPU_NAME="
+set "GPU_COUNT=0"
 
 :: Resolve nvidia-smi explicitly. A GUI-launched batch can have a reduced PATH.
 for /f "delims=" %%s in ('where nvidia-smi.exe 2^>nul') do if not defined NVIDIA_SMI set "NVIDIA_SMI=%%s"
@@ -246,25 +269,36 @@ if not defined NVIDIA_SMI if exist "%SystemRoot%\System32\nvidia-smi.exe" set "N
 
 :: Write the result first to avoid FOR /F corrupting nvidia-smi arguments.
 set "GPU_DETECT_FILE=%TEMP%\paperminer_gpu_%RANDOM%_%RANDOM%.txt"
-if defined NVIDIA_SMI "%NVIDIA_SMI%" --query-gpu=driver_version --format="csv,noheader,nounits" >"%GPU_DETECT_FILE%" 2>nul
+if defined NVIDIA_SMI "%NVIDIA_SMI%" --query-gpu=index,name,driver_version,memory.total --format="csv,noheader,nounits" >"%GPU_DETECT_FILE%" 2>nul
 if exist "%GPU_DETECT_FILE%" (
-    for /f "usebackq tokens=1" %%v in ("%GPU_DETECT_FILE%") do (
-        for /f "tokens=1 delims=." %%m in ("%%v") do (
-            echo %%m| findstr /r /x "[0-9][0-9]*" >nul
-            if !errorlevel!==0 if not defined DRIVER_VER (
-                set "DRIVER_VER=%%v"
-                set "HAS_GPU=1"
-            )
+    for /f "usebackq tokens=1,2,3,4 delims=," %%i in ("%GPU_DETECT_FILE%") do (
+        set /a GPU_COUNT+=1
+        echo   GPU %%i: %%j, memory %%l MiB, driver %%k
+        if not defined DRIVER_VER (
+            set "GPU_NAME=%%j"
+            set "DRIVER_VER=%%k"
+            for /f "tokens=*" %%v in ("!GPU_NAME!") do set "GPU_NAME=%%v"
+            for /f "tokens=*" %%v in ("!DRIVER_VER!") do set "DRIVER_VER=%%v"
+            set "HAS_GPU=1"
         )
     )
     del "%GPU_DETECT_FILE%" >nul 2>nul
+)
+
+if "!HAS_GPU!"=="0" (
+    set "NVIDIA_ADAPTER_FILE=%TEMP%\paperminer_nvidia_adapter_%RANDOM%_%RANDOM%.txt"
+    powershell.exe -NoProfile -Command "Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -ExpandProperty Name" >"!NVIDIA_ADAPTER_FILE!" 2>nul
+    if exist "!NVIDIA_ADAPTER_FILE!" (
+        for /f "usebackq delims=" %%g in ("!NVIDIA_ADAPTER_FILE!") do if not defined GPU_NAME set "GPU_NAME=%%g"
+        del "!NVIDIA_ADAPTER_FILE!" >nul 2>nul
+    )
 )
 
 :: Determine best CUDA version based on driver
 :: Driver >= 560 -> cu126, >= 525 -> cu121, >= 520 -> cu118, else CPU
 set "CUDA_INDEX="
 if "!HAS_GPU!"=="1" (
-    echo   NVIDIA GPU detected, driver version: !DRIVER_VER!
+    echo   NVIDIA CUDA environment detected: !GPU_COUNT! GPU^(s^), driver !DRIVER_VER!
     set "DRIVER_MAJOR=0"
     for /f "tokens=1 delims=." %%m in ("!DRIVER_VER!") do set /a DRIVER_MAJOR=%%m
     if !DRIVER_MAJOR! GEQ 560 (
@@ -281,9 +315,20 @@ if "!HAS_GPU!"=="1" (
         set "HAS_GPU=0"
     ) else (
         echo   Selected PyTorch CUDA version: !CUDA_INDEX!
+        echo   Standalone CUDA Toolkit and cuDNN are not required for this binary installation.
+        echo   The official PyTorch wheel supplies the matching CUDA user-mode runtime and cuDNN.
     )
 ) else (
-    if defined NVIDIA_SMI (echo   nvidia-smi found, but no GPU was reported.) else (echo   nvidia-smi.exe not found; check the NVIDIA driver installation.)
+    if defined GPU_NAME (
+        echo   NVIDIA display adapter found: !GPU_NAME!
+        echo   The NVIDIA driver or nvidia-smi is not ready. PaperMiner will install CPU PyTorch for now.
+        echo   Install or update the driver from: https://www.nvidia.com/Download/index.aspx
+        echo   Then run PaperMiner repair to switch to CUDA acceleration.
+    ) else if defined NVIDIA_SMI (
+        echo   nvidia-smi found, but no CUDA-capable GPU was reported.
+    ) else (
+        echo   No NVIDIA adapter with a usable driver was found.
+    )
     echo   No NVIDIA GPU detected, will use CPU version.
     set "CUDA_INDEX=cpu"
 )
@@ -311,22 +356,35 @@ if !errorlevel!==0 (
 
 if "!TORCH_OK!"=="1" goto :install_mineru
 
+echo.
+echo   Installing common PyTorch dependencies from !PIP_SOURCE_NAME!...
+%PIP_CMD% install filelock typing-extensions sympy networkx jinja2 fsspec numpy pillow !PIP_COMMON_ARGS!
+if errorlevel 1 if /i not "!PIP_INDEX_URL!"=="https://pypi.org/simple" (
+    echo   Selected source failed for PyTorch dependencies; retrying official PyPI...
+    %PIP_CMD% install filelock typing-extensions sympy networkx jinja2 fsspec numpy pillow !PIP_OFFICIAL_ARGS!
+)
+if errorlevel 1 (
+    echo   [WARNING] Some common PyTorch dependencies were not prefetched.
+    echo   The official PyTorch install will make one final attempt.
+)
+
 if "!HAS_GPU!"=="1" (
     echo.
     echo   Installing CUDA version of PyTorch [!CUDA_INDEX!]...
     echo   NOTE: Must download from official PyTorch source (~2.5GB^)
     echo.
-    %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/!CUDA_INDEX!
+    %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/!CUDA_INDEX! --timeout 90 --retries 5 --prefer-binary
 
     :: Verify CUDA actually works after installation
     echo.
     echo   Verifying PyTorch CUDA support...
-    "%PYTHON_EXE%" -c "import torch;cuda_ok=torch.cuda.is_available();name=torch.cuda.get_device_name(0) if cuda_ok else '';print(f'GPU: {name}' if cuda_ok else 'FAIL')" 2>nul | findstr "GPU:" >nul
-    if !errorlevel!==0 (
+    set "GPU_VERIFY_FILE=%TEMP%\paperminer_gpu_verify_%RANDOM%_%RANDOM%.txt"
+    "%PYTHON_EXE%" -c "import torch;ok=torch.cuda.is_available();print('PyTorch: '+torch.__version__);print('CUDA runtime: '+str(torch.version.cuda));print('cuDNN: '+str(torch.backends.cudnn.version()));print('CUDA devices: '+str(torch.cuda.device_count()));[print(f'GPU {i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())];raise SystemExit(0 if ok else 1)" >"!GPU_VERIFY_FILE!" 2>&1
+    set "CUDA_VERIFY_EXIT=!errorlevel!"
+    if exist "!GPU_VERIFY_FILE!" type "!GPU_VERIFY_FILE!"
+    if exist "!GPU_VERIFY_FILE!" del "!GPU_VERIFY_FILE!" >nul 2>nul
+    if "!CUDA_VERIFY_EXIT!"=="0" (
         echo   PyTorch CUDA verification passed!
-        for /f "tokens=*" %%g in ('"%PYTHON_EXE%" -c "import torch;print(torch.cuda.get_device_name(0))" 2^>nul') do (
-            echo   GPU device: %%g
-        )
     ) else (
         echo.
         echo   [WARNING] CUDA verification failed!
@@ -334,7 +392,7 @@ if "!HAS_GPU!"=="1" (
         echo   Falling back to CPU version...
         echo.
         %PIP_CMD% uninstall torch torchvision torchaudio -y >nul 2>nul
-        %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 90 --retries 5 --prefer-binary
         echo.
         echo   CPU version installed. PDF processing will still work,
         echo   but will be slower without GPU acceleration.
@@ -343,7 +401,7 @@ if "!HAS_GPU!"=="1" (
     echo.
     echo   Installing CPU version of PyTorch...
     echo.
-    %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 90 --retries 5 --prefer-binary
 )
 
 :: ----------------------------------------
@@ -362,7 +420,11 @@ echo [Step 3] Installing or upgrading MinerU (>=3.1.0,<4.0)...
 if !errorlevel!==0 (
     echo   Unsupported installed MinerU version detected. Upgrade is required.
 )
-%PIP_CMD% install -U "mineru[core]>=3.1.0,<4.0"
+%PIP_CMD% install -U "mineru[core]>=3.1.0,<4.0" !PIP_COMMON_ARGS!
+if errorlevel 1 if /i not "!PIP_INDEX_URL!"=="https://pypi.org/simple" (
+    echo   Selected PyPI source failed or is not synchronized; retrying official PyPI...
+    %PIP_CMD% install -U "mineru[core]>=3.1.0,<4.0" !PIP_OFFICIAL_ARGS!
+)
 if errorlevel 1 (
     echo [WARNING] MinerU install may have issues. Continue anyway...
 )
@@ -375,12 +437,20 @@ echo.
 echo [Step 4] Installing other dependencies...
 if exist "packages\ttkbootstrap-2.2.2-py3-none-any.whl" (
     echo   Installing bundled ttkbootstrap 2.2.2 UI package...
-    %PIP_CMD% install --upgrade "packages\ttkbootstrap-2.2.2-py3-none-any.whl"
+    %PIP_CMD% install --upgrade "packages\ttkbootstrap-2.2.2-py3-none-any.whl" !PIP_COMMON_ARGS!
 )
 if exist "requirements.txt" (
-    %PIP_CMD% install -r requirements.txt
+    %PIP_CMD% install -r requirements.txt !PIP_COMMON_ARGS!
+    if errorlevel 1 if /i not "!PIP_INDEX_URL!"=="https://pypi.org/simple" (
+        echo   Selected PyPI source failed for remaining dependencies; retrying official PyPI...
+        %PIP_CMD% install -r requirements.txt !PIP_OFFICIAL_ARGS!
+    )
 ) else (
-    %PIP_CMD% install "ttkbootstrap>=2.2.2,<3.0" pandas openpyxl beautifulsoup4 python-docx lxml "pypdf>=5.0.0,<7.0" requests python-dotenv
+    %PIP_CMD% install "ttkbootstrap>=2.2.2,<3.0" pandas openpyxl beautifulsoup4 python-docx lxml "pypdf>=5.0.0,<7.0" requests python-dotenv !PIP_COMMON_ARGS!
+    if errorlevel 1 if /i not "!PIP_INDEX_URL!"=="https://pypi.org/simple" (
+        echo   Selected PyPI source failed for remaining dependencies; retrying official PyPI...
+        %PIP_CMD% install "ttkbootstrap>=2.2.2,<3.0" pandas openpyxl beautifulsoup4 python-docx lxml "pypdf>=5.0.0,<7.0" requests python-dotenv !PIP_OFFICIAL_ARGS!
+    )
 )
 
 :: ----------------------------------------

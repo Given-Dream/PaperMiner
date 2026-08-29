@@ -13,8 +13,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Single-file PaperMiner installer")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.14.0")]
-[assembly: AssemblyFileVersion("1.4.14.0")]
+[assembly: AssemblyVersion("1.4.15.0")]
+[assembly: AssemblyFileVersion("1.4.15.0")]
 
 internal static class PaperMinerSetupBootstrapper
 {
@@ -126,7 +126,7 @@ internal sealed class SetupForm : Form
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
         Label title = new Label();
-        title.Text = "PaperMiner 1.4.14";
+        title.Text = "PaperMiner 1.4.15";
         title.Font = new Font(Font.FontFamily, 18F, FontStyle.Bold);
         title.Location = new Point(30, 25);
         title.AutoSize = true;
@@ -222,7 +222,7 @@ internal sealed class SetupForm : Form
         Controls.Add(anacondaNote);
 
         noCondaCheckBox = new CheckBox();
-        noCondaCheckBox.Text = "\u6211\u786e\u8ba4\u672c\u673a\u6ca1\u6709 Conda\uff0c\u5141\u8bb8\u4ece\u4e2d\u56fd\u955c\u50cf\u4e0b\u8f7d\u5e76\u5b89\u88c5 Anaconda";
+        noCondaCheckBox.Text = "\u6211\u786e\u8ba4\u672c\u673a\u6ca1\u6709 Conda\uff0c\u5141\u8bb8\u4ece\u6d4b\u901f\u540e\u9009\u5b9a\u7684\u955c\u50cf/\u5b98\u65b9\u6e90\u4e0b\u8f7d\u5e76\u5b89\u88c5 Anaconda";
         noCondaCheckBox.Location = new Point(35, 414);
         noCondaCheckBox.Size = new Size(622, 29);
         noCondaCheckBox.CheckedChanged += delegate { NoCondaCheckBoxChanged(); };
@@ -1374,8 +1374,8 @@ internal static class InstallerEngine
     {
         using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UninstallRegistryPath))
         {
-            key.SetValue("DisplayName", "PaperMiner 1.4.14", RegistryValueKind.String);
-            key.SetValue("DisplayVersion", "1.4.14", RegistryValueKind.String);
+            key.SetValue("DisplayName", "PaperMiner 1.4.15", RegistryValueKind.String);
+            key.SetValue("DisplayVersion", "1.4.15", RegistryValueKind.String);
             key.SetValue("Publisher", "PaperMiner Recovery", RegistryValueKind.String);
             key.SetValue("InstallLocation", installDirectory, RegistryValueKind.String);
             key.SetValue("DisplayIcon", Path.Combine(installDirectory, "PaperMiner.exe"), RegistryValueKind.String);

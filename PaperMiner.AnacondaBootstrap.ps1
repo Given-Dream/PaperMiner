@@ -74,10 +74,27 @@ function Get-PaperMinerAnacondaBootstrapConfig {
         InstallerName = $installerName
         ExpectedSha256 = 'b545f4bd8ab3bf32d99002a0779a887668ebfe479ee32ecbf060375670d5ee09'
         ExpectedBytes = [int64]1112492048
-        Mirrors = [string[]]@(
-            ('https://mirrors.tuna.tsinghua.edu.cn/anaconda/archive/' + $installerName)
-            ('https://mirrors.bfsu.edu.cn/anaconda/archive/' + $installerName)
-            ('https://mirror.nju.edu.cn/anaconda/archive/' + $installerName)
+        DownloadSources = [object[]]@(
+            [pscustomobject]@{
+                Name = 'Tsinghua mirror'
+                Uri = ('https://mirrors.tuna.tsinghua.edu.cn/anaconda/archive/' + $installerName)
+                Order = 1
+            }
+            [pscustomobject]@{
+                Name = 'BFSU mirror'
+                Uri = ('https://mirrors.bfsu.edu.cn/anaconda/archive/' + $installerName)
+                Order = 2
+            }
+            [pscustomobject]@{
+                Name = 'NJU mirror'
+                Uri = ('https://mirror.nju.edu.cn/anaconda/archive/' + $installerName)
+                Order = 3
+            }
+            [pscustomobject]@{
+                Name = 'Anaconda official'
+                Uri = ('https://repo.anaconda.com/archive/' + $installerName)
+                Order = 4
+            }
         )
         InstallRoot = $installRoot
         CacheRoot = Join-Path $runtimeRoot 'PaperMinerDownloads'
@@ -101,6 +118,117 @@ function Test-PaperMinerSha256 {
         [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Measure-PaperMinerAnacondaSource {
+    param(
+        [Parameter(Mandatory = $true)]$Source,
+        [scriptblock]$LogAction
+    )
+
+    $client = $null
+    $request = $null
+    $response = $null
+    $stream = $null
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $sampleBytes = 1MB
+    $downloaded = [int64]0
+    try {
+        $client = New-Object System.Net.Http.HttpClient
+        $client.Timeout = [TimeSpan]::FromSeconds(10)
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.15')
+        $request = New-Object System.Net.Http.HttpRequestMessage(
+            [System.Net.Http.HttpMethod]::Get,
+            [string]$Source.Uri)
+        $request.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue(
+            [int64]0,
+            [int64]($sampleBytes - 1))
+        $response = $client.SendAsync(
+            $request,
+            [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
+        ).GetAwaiter().GetResult()
+        [void]$response.EnsureSuccessStatusCode()
+        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $buffer = New-Object byte[] 65536
+        while ($downloaded -lt $sampleBytes -and $watch.Elapsed.TotalSeconds -lt 8) {
+            $remaining = [Math]::Min(
+                $buffer.Length,
+                [int]($sampleBytes - $downloaded))
+            $waitMilliseconds = [Math]::Max(
+                250,
+                [int]((8 - $watch.Elapsed.TotalSeconds) * 1000))
+            $readTask = $stream.ReadAsync($buffer, 0, $remaining)
+            if (-not $readTask.Wait($waitMilliseconds)) {
+                break
+            }
+            $read = $readTask.Result
+            if ($read -le 0) {
+                break
+            }
+            $downloaded += $read
+        }
+        if ($downloaded -le 0) {
+            throw 'No probe data was received.'
+        }
+
+        $seconds = [Math]::Max($watch.Elapsed.TotalSeconds, 0.001)
+        $mibPerSecond = ($downloaded / 1MB) / $seconds
+        Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
+            'Anaconda source probe: {0} = {1:N2} MiB/s ({2:N0} KiB sampled)' -f
+            $Source.Name, $mibPerSecond, ($downloaded / 1KB))
+        return [pscustomobject]@{
+            Name = [string]$Source.Name
+            Uri = [string]$Source.Uri
+            Order = [int]$Source.Order
+            Available = $true
+            MiBPerSecond = [double]$mibPerSecond
+        }
+    }
+    catch {
+        Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
+            'Anaconda source probe unavailable: {0} ({1})' -f
+            $Source.Name, $_.Exception.Message)
+        return [pscustomobject]@{
+            Name = [string]$Source.Name
+            Uri = [string]$Source.Uri
+            Order = [int]$Source.Order
+            Available = $false
+            MiBPerSecond = [double]0
+        }
+    }
+    finally {
+        $watch.Stop()
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $response) { $response.Dispose() }
+        if ($null -ne $request) { $request.Dispose() }
+        if ($null -ne $client) { $client.Dispose() }
+    }
+}
+
+function Get-PaperMinerRankedAnacondaSources {
+    param(
+        [Parameter(Mandatory = $true)]$Configuration,
+        [scriptblock]$LogAction
+    )
+
+    Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
+        'Testing {0} Anaconda download sources, including the official source...' -f
+        @($Configuration.DownloadSources).Count)
+    $measurements = @(
+        foreach ($source in @($Configuration.DownloadSources)) {
+            Measure-PaperMinerAnacondaSource -Source $source -LogAction $LogAction
+        }
+    )
+    $ranked = @($measurements | Sort-Object `
+        @{ Expression = { if ($_.Available) { 1 } else { 0 } }; Descending = $true }, `
+        @{ Expression = { $_.MiBPerSecond }; Descending = $true }, `
+        @{ Expression = { $_.Order }; Descending = $false })
+    if ($ranked.Count -gt 0) {
+        Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
+            'Fastest available Anaconda source: {0} ({1:N2} MiB/s probe)' -f
+            $ranked[0].Name, $ranked[0].MiBPerSecond)
+    }
+    return $ranked
+}
+
 function Invoke-PaperMinerMirrorDownload {
     param(
         [Parameter(Mandatory = $true)]$Configuration,
@@ -111,10 +239,14 @@ function Invoke-PaperMinerMirrorDownload {
     Add-Type -AssemblyName System.Net.Http
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+    $sources = @(Get-PaperMinerRankedAnacondaSources `
+        -Configuration $Configuration `
+        -LogAction $LogAction)
     $attempt = 0
     $errors = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($uri in @($Configuration.Mirrors)) {
+    foreach ($source in $sources) {
         $attempt += 1
+        $uri = [string]$source.Uri
         $partialPath = '{0}.part.{1}.{2}' -f $DestinationPath, $PID, $attempt
         $client = $null
         $response = $null
@@ -123,12 +255,13 @@ function Invoke-PaperMinerMirrorDownload {
 
         try {
             Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
-                'Downloading Anaconda from China mirror {0}/{1}: {2}' -f
-                $attempt, @($Configuration.Mirrors).Count, $uri)
+                'Downloading Anaconda from source {0}/{1} [{2}; probe {3:N2} MiB/s]: {4}' -f
+                $attempt, $sources.Count, $source.Name,
+                $source.MiBPerSecond, $uri)
 
             $client = New-Object System.Net.Http.HttpClient
             $client.Timeout = [TimeSpan]::FromHours(4)
-            $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.14')
+            $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.15')
             $response = $client.GetAsync(
                 [string]$uri,
                 [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
@@ -155,6 +288,7 @@ function Invoke-PaperMinerMirrorDownload {
             $downloaded = [int64]0
             $nextPercent = 5
             $lastByteReport = [int64]0
+            $downloadWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
             while (($read = $downloadStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
                 $fileStream.Write($buffer, 0, $read)
@@ -164,9 +298,11 @@ function Invoke-PaperMinerMirrorDownload {
                         ($downloaded * 100.0) / [int64]$contentLength)
                     if ($percent -ge $nextPercent) {
                         Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
-                            'Anaconda download progress: {0}% ({1:N1}/{2:N1} MiB)' -f
+                            'Anaconda download progress: {0}% ({1:N1}/{2:N1} MiB; average {3:N2} MiB/s)' -f
                             $percent, ($downloaded / 1MB),
-                            ([int64]$contentLength / 1MB))
+                            ([int64]$contentLength / 1MB),
+                            (($downloaded / 1MB) /
+                                [Math]::Max($downloadWatch.Elapsed.TotalSeconds, 0.001)))
                         while ($nextPercent -le $percent) {
                             $nextPercent += 5
                         }
@@ -177,7 +313,15 @@ function Invoke-PaperMinerMirrorDownload {
                     Write-PaperMinerAnacondaLog -LogAction $LogAction -Message (
                         'Anaconda downloaded: {0:N1} MiB' -f ($downloaded / 1MB))
                 }
+                if ($attempt -lt $sources.Count -and
+                    $downloadWatch.Elapsed.TotalSeconds -ge 30 -and
+                    (($downloaded / 1MB) /
+                        [Math]::Max($downloadWatch.Elapsed.TotalSeconds, 0.001)) -lt 0.125) {
+                    throw ('Sustained speed below 0.125 MiB/s; switching from {0} to the next source.' -f
+                        $source.Name)
+                }
             }
+            $downloadWatch.Stop()
 
             $fileStream.Flush()
             $fileStream.Dispose()
@@ -205,7 +349,7 @@ function Invoke-PaperMinerMirrorDownload {
             return $DestinationPath
         }
         catch {
-            $message = 'Mirror failed: {0} ({1})' -f $uri, $_.Exception.Message
+            $message = 'Download source failed: {0} ({1})' -f $uri, $_.Exception.Message
             $errors.Add($message)
             Write-PaperMinerAnacondaLog -LogAction $LogAction -Message $message
         }
@@ -220,7 +364,7 @@ function Invoke-PaperMinerMirrorDownload {
         }
     }
 
-    throw ('All configured China mirrors failed. {0}' -f ($errors -join ' | '))
+    throw ('All configured Anaconda download sources failed. {0}' -f ($errors -join ' | '))
 }
 
 function Get-PaperMinerVerifiedAnacondaInstaller {

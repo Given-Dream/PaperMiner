@@ -1,4 +1,4 @@
-# PaperMiner 1.4.14 软件版
+# PaperMiner 1.4.15 软件版
 
 ## 发布与安装
 
@@ -12,9 +12,13 @@
 6. 安装阶段不会自动启动主程序。
 7. 安装完成后，安装目录中才会出现 `PaperMiner.exe` 和 `Uninstall.exe`，桌面会生成 PaperMiner 快捷方式。Setup 底部“安装”位于左侧，“取消”位于右侧；Enter 安装、Esc 取消。
 
-Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 优先复用已有 Conda；新电脑没有 Conda 时，从三个中国镜像下载并校验 Anaconda 2026.07-1，再安装到用户在 Setup 中指定的独立目录。MinerU 环境路径来自 Conda JSON，不假设固定在 `<Conda根>\envs\MinerU`。
+Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 优先复用已有 Conda；新电脑没有 Conda 时，对清华、北外、南大和 Anaconda 官方源读取短样本测速，优先使用当前网络最快的可用来源，下载并校验 Anaconda 2026.07-1，再安装到用户在 Setup 中指定的独立目录。下载源失败或持续过慢时会自动切换。MinerU 环境路径来自 Conda JSON，不假设固定在 `<Conda根>\envs\MinerU`。
 
 自动下载约 1.04 GiB，SHA-256 必须等于 `b545f4bd8ab3bf32d99002a0779a887668ebfe479ee32ecbf060375670d5ee09`。PaperMiner 与 Anaconda 目录不能重叠；已有 Conda 时不会使用或创建备用 Anaconda 目录。
+
+安装 MinerU 前会并行测试清华、阿里云、中科大、腾讯和 PyPI 官方索引的短 wheel 样本，只使用测速最快的单一索引；镜像缺包或未同步时重试官方 PyPI。PyTorch CUDA 主 wheel 仍来自 PyTorch 官方仓库，普通依赖可以从测速选出的 PyPI 源获取。
+
+GPU 阶段会列出每张 NVIDIA 显卡的型号、显存和驱动版本。二进制 PyTorch wheel 已包含所需 CUDA 用户态运行库和 cuDNN，Setup 不安装完整 CUDA Toolkit，也不静默修改系统显卡驱动。驱动缺失或版本过旧时先安装 CPU 版并显示 NVIDIA 官方驱动地址；驱动就绪后运行“重装”即可切换。安装后日志显示 PyTorch、CUDA runtime、cuDNN 和全部可用 GPU，并以 `torch.cuda.is_available()` 作为最终判定。
 
 ## 正常运行
 

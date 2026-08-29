@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.14** · [下载 PaperMiner v1.4.14](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.14)
+当前版本：**v1.4.15** · [下载 PaperMiner v1.4.15](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -26,6 +26,14 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 代码与数据可用性 | 提取文末代码仓库和数据集超链接；只有可信地址才生成可核验 Markdown |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.15 下载加速与 GPU 环境诊断
+
+- Anaconda 下载源扩展为清华、北外、南大和 Anaconda 官方源；安装前对每个来源读取短样本测速，按当前网络实测速率排序，失败或持续过慢时自动切换。
+- 普通 Python 依赖同时测试清华、阿里云、中科大、腾讯和 PyPI 官方源，选择最快的单一索引；镜像缺包或未同步时自动回退官方 PyPI。
+- PyTorch CUDA 主 wheel 继续来自 PyTorch 官方仓库，通用依赖可从测速选出的 PyPI 源获取，避免大批小 wheel 固定走慢速跨境链路。
+- GPU 检测会列出每张 NVIDIA 显卡的型号、显存和驱动版本；安装匹配的 PyTorch CUDA wheel 后显示 CUDA runtime、cuDNN 版本及全部可用设备。
+- 二进制 PyTorch 安装不单独安装 CUDA Toolkit 或 cuDNN。没有可用 NVIDIA 驱动时安装 CPU 版，并明确提示官方驱动地址；驱动就绪后可通过“重装”切换到 CUDA 版。
 
 ## v1.4.14 无 Conda 快速确认与按钮顺序
 
@@ -153,15 +161,15 @@ Setup 中分别指定：
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.14 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.14)。
-2. 下载 `PaperMiner-v1.4.14-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
+1. 打开 [v1.4.15 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)。
+2. 下载 `PaperMiner-v1.4.15-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
 3. 双击安装包。Setup 先快速检查明确路径和已保存配置；未找到时，可直接勾选“我确认本机没有 Conda”，也可先使用“检测此目录”或“全盘检索 Conda”进行额外核查。PaperMiner 默认目录为：
 
    ```text
    %LOCALAPPDATA%\Programs\PaperMiner
    ```
 
-4. 安装阶段会打开日志窗口。确认没有 Conda 后，安装器会从多个中国镜像下载约 1.04 GiB 的 Anaconda 并校验 SHA-256；随后使用 `conda-forge --override-channels` 创建环境并安装依赖，记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
+4. 安装阶段会打开日志窗口。确认没有 Conda 后，安装器会对三个中国镜像和 Anaconda 官方源测速，下载约 1.04 GiB 的安装包并校验 SHA-256；普通 Python 依赖也会在四个中国镜像与 PyPI 官方源之间测速选择。随后使用 `conda-forge --override-channels` 创建环境并安装依赖，记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
 5. 安装完成后，从桌面快捷方式或安装目录中的 `PaperMiner.exe` 启动。
 
 两个安装目录均可放在 C、D、E、F 等任意可写盘符。已有 Conda 与 `MinerU` 环境也可以分处不同磁盘。
