@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.15** · [下载 PaperMiner v1.4.15](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)
+当前版本：**v1.4.15** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.15/PaperMiner-v1.4.15-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -150,7 +150,7 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 1. 选择安装目录
 
-不再要求预先安装 Conda。Setup 先快速检查明确传入路径和 PaperMiner 已保存配置；没有结果时，可直接勾选确认本机没有 Conda，也可先选择指定目录复检或主动全盘检索。确认框选中后，安装器从中国镜像下载并安装 Anaconda。
+不再要求预先安装 Conda。Setup 先快速检查明确传入路径和 PaperMiner 已保存配置；没有结果时，可直接勾选确认本机没有 Conda，也可先选择指定目录复检或主动全盘检索。确认框选中后，安装器会对三个中国镜像与 Anaconda 官方源读取短样本测速，再从当前网络下最快的可用来源下载并安装 Anaconda。
 
 Setup 中分别指定：
 
@@ -162,14 +162,14 @@ Setup 中分别指定：
 ### 2. 下载并运行 Setup
 
 1. 打开 [v1.4.15 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)。
-2. 下载 `PaperMiner-v1.4.15-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
+2. 下载 `PaperMiner-v1.4.15-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验完整性。安装包 SHA-256 为 `6DCE3DA7CA841D8232E731CB7B979684D643FA59A10F6D9F11EE5C4460A76683`。
 3. 双击安装包。Setup 先快速检查明确路径和已保存配置；未找到时，可直接勾选“我确认本机没有 Conda”，也可先使用“检测此目录”或“全盘检索 Conda”进行额外核查。PaperMiner 默认目录为：
 
    ```text
    %LOCALAPPDATA%\Programs\PaperMiner
    ```
 
-4. 安装阶段会打开日志窗口。确认没有 Conda 后，安装器会对三个中国镜像和 Anaconda 官方源测速，下载约 1.04 GiB 的安装包并校验 SHA-256；普通 Python 依赖也会在四个中国镜像与 PyPI 官方源之间测速选择。随后使用 `conda-forge --override-channels` 创建环境并安装依赖，记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
+4. 安装阶段会打开日志窗口。确认没有 Conda 后，安装器会对三个中国镜像和 Anaconda 官方源测速，下载约 1.04 GiB 的安装包并校验 SHA-256；普通 Python 依赖也会在清华、阿里云、中科大、腾讯和 PyPI 官方源之间并行测速，选择最快的单一索引，失败时回退官方 PyPI。随后使用 `conda-forge --override-channels` 创建环境并安装依赖，记录真实 MinerU 运行环境。首次安装还会下载 PyTorch 等依赖，需要较长时间与数 GB 磁盘空间。
 5. 安装完成后，从桌面快捷方式或安装目录中的 `PaperMiner.exe` 启动。
 
 两个安装目录均可放在 C、D、E、F 等任意可写盘符。已有 Conda 与 `MinerU` 环境也可以分处不同磁盘。
