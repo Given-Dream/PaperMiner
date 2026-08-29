@@ -1,4 +1,4 @@
-# PaperMiner 1.4.13 软件版
+# PaperMiner 1.4.14 软件版
 
 ## 发布与安装
 
@@ -6,11 +6,11 @@
 
 1. 双击 `Setup.exe`。
 2. 等待 Setup 依次检查明确传入的 Conda 路径和 PaperMiner 已保存的运行环境配置。检测到时只显示复用路径。
-3. 自动检测不到时，选择“检测此目录”或“全盘检索 Conda”。全盘检索为用户主动触发的只读操作；检索完成且未找到 Conda 后，才允许勾选确认框并下载 Anaconda。
+3. 自动检测不到时，可直接勾选“我确认本机没有 Conda”；也可先选择“检测此目录”或“全盘检索 Conda”进行额外核查。全盘检索是用户主动触发的只读操作，不是安装前置条件。
 4. 选择 PaperMiner 安装位置和（无 Conda 时的）Anaconda 下载目标。两个目录不能重叠或直接使用磁盘根目录。
 5. 安装器解包后打开 PowerShell 日志窗口；没有 Conda 时先从中国镜像下载并校验 Anaconda，再完成 MinerU 环境安装或修复。
 6. 安装阶段不会自动启动主程序。
-7. 安装完成后，安装目录中才会出现 `PaperMiner.exe` 和 `Uninstall.exe`，桌面会生成 PaperMiner 快捷方式。
+7. 安装完成后，安装目录中才会出现 `PaperMiner.exe` 和 `Uninstall.exe`，桌面会生成 PaperMiner 快捷方式。Setup 底部“安装”位于左侧，“取消”位于右侧；Enter 安装、Esc 取消。
 
 Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 优先复用已有 Conda；新电脑没有 Conda 时，从三个中国镜像下载并校验 Anaconda 2026.07-1，再安装到用户在 Setup 中指定的独立目录。MinerU 环境路径来自 Conda JSON，不假设固定在 `<Conda根>\envs\MinerU`。
 

@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.13** · [下载 PaperMiner v1.4.13](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.13)
+当前版本：**v1.4.14** · [下载 PaperMiner v1.4.14](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.14)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -26,6 +26,13 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 代码与数据可用性 | 提取文末代码仓库和数据集超链接；只有可信地址才生成可核验 Markdown |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.14 无 Conda 快速确认与按钮顺序
+
+- Setup 完成快速自动检查、未从明确路径或已保存配置找到 Conda 后，立即启用“我确认本机没有 Conda”复选框。
+- 用户可以直接确认并进入多镜像 Anaconda 下载流程，不再被要求先执行“检测此目录”或“全盘检索 Conda”。
+- 指定目录检测与全盘检索继续保留为可选核查工具；发现可用 Conda 时仍会优先复用，避免重复安装。
+- 底部操作顺序调整为“安装”在左、“取消”在右，同时保留 Enter 安装、Esc 取消的键盘习惯。
 
 ## v1.4.13 Conda 严格检测与可选全盘检索
 
@@ -135,7 +142,7 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 ### 1. 选择安装目录
 
-不再要求预先安装 Conda。Setup 先检查明确传入路径和 PaperMiner 已保存配置；没有结果时，由用户选择指定目录复检或主动全盘检索。只有完成其中一种检索并确认没有 Conda，才从中国镜像下载并安装 Anaconda。
+不再要求预先安装 Conda。Setup 先快速检查明确传入路径和 PaperMiner 已保存配置；没有结果时，可直接勾选确认本机没有 Conda，也可先选择指定目录复检或主动全盘检索。确认框选中后，安装器从中国镜像下载并安装 Anaconda。
 
 Setup 中分别指定：
 
@@ -146,9 +153,9 @@ Setup 中分别指定：
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.13 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.13)。
-2. 下载 `PaperMiner-v1.4.13-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
-3. 双击安装包。Setup 先检查明确路径和已保存配置；未找到时选择“检测此目录”或“全盘检索 Conda”，确认没有 Conda 后才进入备用 Anaconda 下载流程。PaperMiner 默认目录为：
+1. 打开 [v1.4.14 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.14)。
+2. 下载 `PaperMiner-v1.4.14-Setup.exe`，可使用同页的 SHA-256 摘要校验文件。
+3. 双击安装包。Setup 先快速检查明确路径和已保存配置；未找到时，可直接勾选“我确认本机没有 Conda”，也可先使用“检测此目录”或“全盘检索 Conda”进行额外核查。PaperMiner 默认目录为：
 
    ```text
    %LOCALAPPDATA%\Programs\PaperMiner

@@ -128,7 +128,7 @@ function Invoke-PaperMinerMirrorDownload {
 
             $client = New-Object System.Net.Http.HttpClient
             $client.Timeout = [TimeSpan]::FromHours(4)
-            $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.13')
+            $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.14')
             $response = $client.GetAsync(
                 [string]$uri,
                 [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead

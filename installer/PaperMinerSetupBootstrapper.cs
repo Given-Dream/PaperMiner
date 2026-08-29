@@ -13,8 +13,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Single-file PaperMiner installer")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.13.0")]
-[assembly: AssemblyFileVersion("1.4.13.0")]
+[assembly: AssemblyVersion("1.4.14.0")]
+[assembly: AssemblyFileVersion("1.4.14.0")]
 
 internal static class PaperMinerSetupBootstrapper
 {
@@ -112,7 +112,6 @@ internal sealed class SetupForm : Form
     private bool condaDetectionInProgress;
     private bool manualCondaDetectionInProgress;
     private bool fullDiskSearchInProgress;
-    private bool manualCondaProbeCompleted;
     private bool anacondaLocationShown;
     private string manualCondaRoot;
 
@@ -127,7 +126,7 @@ internal sealed class SetupForm : Form
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
         Label title = new Label();
-        title.Text = "PaperMiner 1.4.13";
+        title.Text = "PaperMiner 1.4.14";
         title.Font = new Font(Font.FontFamily, 18F, FontStyle.Bold);
         title.Location = new Point(30, 25);
         title.AutoSize = true;
@@ -137,7 +136,7 @@ internal sealed class SetupForm : Form
         description.Text =
             "\u6b64 Setup.exe \u662f\u5b8c\u6574\u5b89\u88c5\u5305\u3002\u5b89\u88c5\u540e\u624d\u4f1a\u751f\u6210 PaperMiner.exe \u548c Uninstall.exe\u3002\r\n" +
             "\u53ef\u5b89\u88c5\u5230 C/D/E/F \u7b49\u4efb\u610f\u53ef\u5199\u76ee\u5f55\uff08\u4e0d\u80fd\u76f4\u63a5\u9009\u62e9\u78c1\u76d8\u6839\u76ee\u5f55\uff09\u3002\r\n" +
-            "Setup \u5148\u68c0\u67e5\u660e\u786e\u8def\u5f84\u548c PaperMiner \u5df2\u4fdd\u5b58\u914d\u7f6e\uff1b\u627e\u4e0d\u5230\u65f6\u53ef\u6307\u5b9a\u76ee\u5f55\u6216\u4e3b\u52a8\u5168\u76d8\u68c0\u7d22\u3002\r\n" +
+            "Setup \u5148\u68c0\u67e5\u660e\u786e\u8def\u5f84\u548c PaperMiner \u5df2\u4fdd\u5b58\u914d\u7f6e\uff1b\u627e\u4e0d\u5230\u65f6\u53ef\u76f4\u63a5\u786e\u8ba4\u672a\u5b89\u88c5\uff0c\u6216\u9009\u62e9\u989d\u5916\u68c0\u7d22\u3002\r\n" +
             "\u5b89\u88c5\u9636\u6bb5\u4f1a\u53e6\u884c\u663e\u793a PowerShell \u65e5\u5fd7\uff0c\u4e0d\u4f1a\u81ea\u52a8\u542f\u52a8\u4e3b\u7a0b\u5e8f\u3002";
         description.Location = new Point(33, 73);
         description.Size = new Size(625, 88);
@@ -216,7 +215,7 @@ internal sealed class SetupForm : Form
         Controls.Add(fullDiskSearchButton);
 
         anacondaNote = new Label();
-        anacondaNote.Text = "\u9009\u62e9\u4e00\u79cd\u65b9\u5f0f\uff1a\u68c0\u6d4b\u6307\u5b9a\u76ee\u5f55\uff0c\u6216\u4e3b\u52a8\u5168\u76d8\u68c0\u7d22\u3002\r\n\u786e\u8ba4\u65e0 Conda \u540e\uff0c\u4e0a\u65b9\u8def\u5f84\u5c06\u4f5c\u4e3a Anaconda \u4e0b\u8f7d\u5b89\u88c5\u76ee\u6807\u3002";
+        anacondaNote.Text = "\u6307\u5b9a\u76ee\u5f55\u68c0\u6d4b\u548c\u5168\u76d8\u68c0\u7d22\u5747\u4e3a\u53ef\u9009\u6838\u67e5\u3002\r\n\u786e\u8ba4\u65e0 Conda \u540e\uff0c\u4e0a\u65b9\u8def\u5f84\u5c06\u4f5c\u4e3a Anaconda \u4e0b\u8f7d\u5b89\u88c5\u76ee\u6807\u3002";
         anacondaNote.ForeColor = Color.DimGray;
         anacondaNote.Location = new Point(35, 360);
         anacondaNote.Size = new Size(410, 50);
@@ -234,13 +233,12 @@ internal sealed class SetupForm : Form
             if (!manualCondaDetectionInProgress)
             {
                 manualCondaRoot = null;
-                manualCondaProbeCompleted = false;
-                noCondaCheckBox.Checked = false;
-                noCondaCheckBox.Enabled = false;
+                noCondaCheckBox.Enabled = anacondaLocationShown &&
+                    detectedCondaRoot == null && manualCondaRoot == null;
                 if (anacondaLocationShown && !noCondaCheckBox.Checked)
                 {
                     condaStatusLabel.ForeColor = Color.DarkOrange;
-                    condaStatusLabel.Text = "\u8def\u5f84\u5df2\u4fee\u6539\uff0c\u8bf7\u70b9\u51fb\u201c\u68c0\u6d4b\u6b64\u76ee\u5f55\u201d\u9a8c\u8bc1\u73b0\u6709 Conda\u3002";
+                    condaStatusLabel.Text = "\u8def\u5f84\u5df2\u4fee\u6539\u3002\u53ef\u9009\u68c0\u6d4b\u73b0\u6709 Conda\uff0c\u6216\u76f4\u63a5\u786e\u8ba4\u672c\u673a\u6ca1\u6709 Conda\u3002";
                 }
                 UpdateInstallReadiness();
             }
@@ -262,14 +260,14 @@ internal sealed class SetupForm : Form
 
         cancelButton = new Button();
         cancelButton.Text = "\u53d6\u6d88";
-        cancelButton.Location = new Point(445, 525);
+        cancelButton.Location = new Point(557, 525);
         cancelButton.Size = new Size(100, 36);
         cancelButton.Click += delegate { Close(); };
         Controls.Add(cancelButton);
 
         installButton = new Button();
         installButton.Text = "\u5b89\u88c5";
-        installButton.Location = new Point(557, 525);
+        installButton.Location = new Point(445, 525);
         installButton.Size = new Size(100, 36);
         installButton.Enabled = false;
         installButton.Click += InstallButtonClick;
@@ -297,7 +295,7 @@ internal sealed class SetupForm : Form
         bool ready = condaDetectionCompleted && !condaDetectionInProgress &&
             !manualCondaDetectionInProgress && !fullDiskSearchInProgress &&
             (detectedCondaRoot != null || manualCondaRoot != null ||
-             (manualCondaProbeCompleted && noCondaCheckBox.Checked));
+             noCondaCheckBox.Checked);
         installButton.Enabled = ready;
     }
 
@@ -307,7 +305,6 @@ internal sealed class SetupForm : Form
         if (detectedCondaRoot != null)
         {
             manualCondaRoot = null;
-            manualCondaProbeCompleted = false;
             noCondaCheckBox.Checked = false;
             noCondaCheckBox.Enabled = false;
             condaStatusLabel.ForeColor = Color.DarkGreen;
@@ -335,15 +332,14 @@ internal sealed class SetupForm : Form
             ? Color.DarkOrange
             : Color.Firebrick;
         condaStatusLabel.Text = string.IsNullOrWhiteSpace(errorMessage)
-            ? "\u660e\u786e\u8def\u5f84\u548c\u5df2\u4fdd\u5b58\u914d\u7f6e\u4e2d\u672a\u627e\u5230 Conda\uff0c\u8bf7\u68c0\u6d4b\u6307\u5b9a\u76ee\u5f55\u6216\u4e3b\u52a8\u5168\u76d8\u68c0\u7d22\u3002"
-            : "Conda \u81ea\u52a8\u68c0\u6d4b\u5931\u8d25\uff0c\u8bf7\u6539\u7528\u6307\u5b9a\u76ee\u5f55\u6216\u5168\u76d8\u68c0\u7d22\u3002";
+            ? "\u660e\u786e\u8def\u5f84\u548c\u5df2\u4fdd\u5b58\u914d\u7f6e\u4e2d\u672a\u627e\u5230 Conda\u3002\u53ef\u76f4\u63a5\u786e\u8ba4\u672a\u5b89\u88c5\uff0c\u6216\u9009\u62e9\u989d\u5916\u68c0\u7d22\u3002"
+            : "Conda \u81ea\u52a8\u68c0\u6d4b\u5931\u8d25\u3002\u53ef\u76f4\u63a5\u786e\u8ba4\u672a\u5b89\u88c5\uff0c\u6216\u9009\u62e9\u989d\u5916\u68c0\u7d22\u3002";
         manualCondaRoot = null;
-        manualCondaProbeCompleted = false;
         noCondaCheckBox.Checked = false;
         SetAnacondaLocationVisible(true);
         condaPathDetectButton.Enabled = true;
         fullDiskSearchButton.Enabled = true;
-        noCondaCheckBox.Enabled = false;
+        noCondaCheckBox.Enabled = true;
         UpdateInstallReadiness();
     }
 
@@ -359,7 +355,6 @@ internal sealed class SetupForm : Form
         condaDetectionCompleted = false;
         detectedCondaRoot = null;
         manualCondaRoot = null;
-        manualCondaProbeCompleted = false;
         noCondaCheckBox.Checked = false;
         condaDetectButton.Enabled = false;
         condaPathDetectButton.Enabled = false;
@@ -419,7 +414,6 @@ internal sealed class SetupForm : Form
 
         manualCondaDetectionInProgress = true;
         manualCondaRoot = null;
-        manualCondaProbeCompleted = false;
         noCondaCheckBox.Checked = false;
         condaPathDetectButton.Enabled = false;
         anacondaBrowseButton.Enabled = false;
@@ -442,12 +436,10 @@ internal sealed class SetupForm : Form
             }
 
             manualCondaDetectionInProgress = false;
-            manualCondaProbeCompleted = true;
             progressBar.Visible = false;
             condaPathDetectButton.Enabled = true;
             anacondaBrowseButton.Enabled = true;
             fullDiskSearchButton.Enabled = true;
-            noCondaCheckBox.Enabled = false;
             if (arguments.Error != null)
             {
                 condaStatusLabel.ForeColor = Color.Firebrick;
@@ -466,8 +458,8 @@ internal sealed class SetupForm : Form
                 condaStatusLabel.ForeColor = Color.Firebrick;
                 condaStatusLabel.Text = "\u8be5\u76ee\u5f55\u4e2d\u6ca1\u6709\u53ef\u7528 Conda\u3002\u5982\u679c\u786e\u5b9e\u672a\u5b89\u88c5\uff0c\u52fe\u9009\u4e0b\u65b9\u786e\u8ba4\u540e\u624d\u4f1a\u4e0b\u8f7d\u3002";
                 manualCondaRoot = null;
-                noCondaCheckBox.Enabled = true;
             }
+            noCondaCheckBox.Enabled = manualCondaRoot == null;
             statusLabel.Text = "\u6307\u5b9a\u76ee\u5f55\u68c0\u6d4b\u5b8c\u6210\u3002";
             UpdateInstallReadiness();
         };
@@ -484,7 +476,6 @@ internal sealed class SetupForm : Form
 
         fullDiskSearchInProgress = true;
         manualCondaRoot = null;
-        manualCondaProbeCompleted = false;
         noCondaCheckBox.Checked = false;
         condaPathDetectButton.Enabled = false;
         anacondaBrowseButton.Enabled = false;
@@ -524,14 +515,11 @@ internal sealed class SetupForm : Form
             }
 
             fullDiskSearchInProgress = false;
-            manualCondaProbeCompleted = arguments.Error == null;
             progressBar.Visible = false;
             condaPathDetectButton.Enabled = true;
             anacondaBrowseButton.Enabled = true;
             anacondaPathBox.Enabled = true;
             fullDiskSearchButton.Enabled = true;
-            noCondaCheckBox.Enabled = false;
-
             if (arguments.Error != null)
             {
                 manualCondaRoot = null;
@@ -553,11 +541,11 @@ internal sealed class SetupForm : Form
             else
             {
                 manualCondaRoot = null;
-                noCondaCheckBox.Enabled = true;
                 condaStatusLabel.ForeColor = Color.DarkOrange;
                 condaStatusLabel.Text = "\u5168\u76d8\u68c0\u7d22\u672a\u627e\u5230\u53ef\u7528 Conda\u3002\u786e\u8ba4\u672a\u5b89\u88c5\u540e\uff0c\u624d\u53ef\u52fe\u9009\u4e0b\u65b9\u786e\u8ba4\u6846\u3002";
                 statusLabel.Text = "\u5168\u76d8\u68c0\u7d22\u5b8c\u6210\uff0c\u672a\u627e\u5230 Conda\u3002";
             }
+            noCondaCheckBox.Enabled = manualCondaRoot == null;
             UpdateInstallReadiness();
         };
         detector.RunWorkerAsync();
@@ -566,7 +554,7 @@ internal sealed class SetupForm : Form
     private void NoCondaCheckBoxChanged()
     {
         if (noCondaCheckBox.Checked &&
-            (!manualCondaProbeCompleted || manualCondaRoot != null))
+            (detectedCondaRoot != null || manualCondaRoot != null))
         {
             noCondaCheckBox.Checked = false;
             return;
@@ -581,7 +569,7 @@ internal sealed class SetupForm : Form
         else if (manualCondaRoot == null && anacondaLocationShown)
         {
             condaStatusLabel.ForeColor = Color.DarkOrange;
-            condaStatusLabel.Text = "\u8bf7\u5148\u6307\u5b9a Conda \u76ee\u5f55\u5e76\u70b9\u51fb\u68c0\u6d4b\uff0c\u6216\u52fe\u9009\u201c\u6211\u786e\u8ba4\u672c\u673a\u6ca1\u6709 Conda\u201d\u3002";
+            condaStatusLabel.Text = "\u53ef\u9009\u68c0\u6d4b\u6307\u5b9a\u76ee\u5f55\u6216\u5168\u76d8\u68c0\u7d22\uff0c\u4e5f\u53ef\u76f4\u63a5\u52fe\u9009\u201c\u6211\u786e\u8ba4\u672c\u673a\u6ca1\u6709 Conda\u201d\u3002";
         }
         UpdateInstallReadiness();
     }
@@ -734,7 +722,7 @@ internal sealed class SetupForm : Form
             anacondaPathBox.Enabled = detectedCondaRoot == null;
             fullDiskSearchButton.Enabled = detectedCondaRoot == null;
             noCondaCheckBox.Enabled = detectedCondaRoot == null &&
-                manualCondaProbeCompleted && manualCondaRoot == null;
+                manualCondaRoot == null;
             cancelButton.Enabled = true;
             UpdateInstallReadiness();
             MessageBox.Show(
@@ -1386,8 +1374,8 @@ internal static class InstallerEngine
     {
         using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UninstallRegistryPath))
         {
-            key.SetValue("DisplayName", "PaperMiner 1.4.13", RegistryValueKind.String);
-            key.SetValue("DisplayVersion", "1.4.13", RegistryValueKind.String);
+            key.SetValue("DisplayName", "PaperMiner 1.4.14", RegistryValueKind.String);
+            key.SetValue("DisplayVersion", "1.4.14", RegistryValueKind.String);
             key.SetValue("Publisher", "PaperMiner Recovery", RegistryValueKind.String);
             key.SetValue("InstallLocation", installDirectory, RegistryValueKind.String);
             key.SetValue("DisplayIcon", Path.Combine(installDirectory, "PaperMiner.exe"), RegistryValueKind.String);
