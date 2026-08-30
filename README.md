@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.15** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.15/PaperMiner-v1.4.15-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)
+当前版本：**v1.4.16** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.16/PaperMiner-v1.4.16-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.16)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -26,6 +26,13 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 代码与数据可用性 | 提取文末代码仓库和数据集超链接；只有可信地址才生成可核验 Markdown |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.16 连续运行与 GPU 智能推荐
+
+- 每次点击“开始处理”后，任务看板会在环境预检前立即清空上一轮完成状态、100% 进度、文件提示以及成功/失败/跳过统计。
+- GPU 完整处理期间低频采样每张卡的利用率和显存；任务完成后结合解析结果、CUDA OOM 与原生崩溃信息生成“下一轮 GPU 建议”。
+- 建议按卡给出任务数，单轮最多调整一档。用户必须点击“应用到下一轮”确认；软件不会在正在处理时自动提高并发。
+- 采样不完整、任务被停止或存在 GPU 解析失败时保持当前设置；显存接近上限、OOM 或原生崩溃时建议降低并发。
 
 ## v1.4.15 下载加速与 GPU 环境诊断
 
@@ -161,8 +168,8 @@ Setup 中分别指定：
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.15 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.15)。
-2. 下载 `PaperMiner-v1.4.15-Setup.exe`，可使用同页的 `SHA256SUMS.txt` 校验完整性。安装包 SHA-256 为 `6DCE3DA7CA841D8232E731CB7B979684D643FA59A10F6D9F11EE5C4460A76683`。
+1. 打开 [v1.4.16 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.16)。
+2. 下载 `PaperMiner-v1.4.16-Setup.exe`，并使用同页的 `SHA256SUMS.txt` 校验完整性。
 3. 双击安装包。Setup 先快速检查明确路径和已保存配置；未找到时，可直接勾选“我确认本机没有 Conda”，也可先使用“检测此目录”或“全盘检索 Conda”进行额外核查。PaperMiner 默认目录为：
 
    ```text
@@ -181,7 +188,7 @@ Setup 中分别指定：
 1. 在“输入文件”区域点击“选择目录”，选择存放 PDF 的文件夹。
 2. 在“输出操作”区域点击“选择输出”，指定结果根目录；软件会在其中建立 `raw` 和 `extract`。
 3. 点击“刷新文件”，选择完整流程或仅提取已有 raw 结果。
-4. 完整流程启用 GPU 时，等待显卡识别完成，然后打开“GPU 并行设置”。单卡用户只启用一张卡；多卡用户可启用多张卡，建议先使用“全部 GPU：每卡 1 个任务”的安全预设。
+4. 完整流程启用 GPU 时，等待显卡识别完成，然后打开“GPU 并行设置”。单卡用户只启用一张卡；多卡用户可启用多张卡，建议先使用“全部 GPU：每卡 1 个任务”的安全预设。完成一轮后可在任务看板核查逐卡指标，并人工应用下一轮智能建议。
 5. 勾选需要的文字、公式、图片、表格、章节和“代码与数据可用性”功能。
 6. 点击“开始处理”，确认对话框会显示 GPU 与任务槽计划；在右侧查看带显卡/任务槽标记的实时日志和任务统计。
 7. 从“打开 raw”或“打开 extract”进入输出目录。

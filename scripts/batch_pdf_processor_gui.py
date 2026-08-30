@@ -60,7 +60,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.11"
+    __version__ = "1.4.16"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -108,6 +108,19 @@ except ImportError:
         extract_availability_links,
         write_availability_report,
         write_availability_scan_marker,
+    )
+
+try:
+    from gpu_advisor import (
+        build_gpu_recommendation,
+        parse_nvidia_smi_csv,
+        recommendation_evidence_text,
+    )
+except ImportError:
+    from scripts.gpu_advisor import (
+        build_gpu_recommendation,
+        parse_nvidia_smi_csv,
+        recommendation_evidence_text,
     )
 
 # 设置标准输出编码为 UTF-8。
@@ -446,6 +459,15 @@ class BatchPDFProcessorGUI:
         self._gpu_detection_completed = False
         self._gpu_detection_in_progress = False
         self._gpu_detection_lock = threading.Lock()
+        self.gpu_run_recommendation = None
+        self._gpu_monitor_lock = threading.RLock()
+        self._gpu_monitor_stop_event = None
+        self._gpu_monitor_thread = None
+        self._gpu_monitor_run_id = 0
+        self._gpu_monitor_assignments = []
+        self._gpu_monitor_samples = {}
+        self._gpu_monitor_job_stats = {}
+        self._gpu_monitor_error = ""
         self._load_directory_preferences()
 
         # 正常运行由 PaperMiner.exe 直接启动 pythonw.exe，不再依赖外部
@@ -575,6 +597,13 @@ class BatchPDFProcessorGUI:
                     "selected_gpu_ids": selected_gpu_ids,
                     "tasks_per_gpu": tasks_per_gpu,
                 }
+
+            recommendation = payload.get("gpu_last_recommendation")
+            if (
+                isinstance(recommendation, dict)
+                and isinstance(recommendation.get("per_gpu"), list)
+            ):
+                self.gpu_run_recommendation = recommendation
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             _STARTUP_MESSAGES.append(f"警告: 目录配置读取失败，已使用默认目录: {exc}")
         finally:
@@ -595,7 +624,7 @@ class BatchPDFProcessorGUI:
             )
             self.user_config_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "input_directory": str(self.input_path),
                 "output_directory": str(self.output_path),
                 "gpu_parallel": {
@@ -609,6 +638,11 @@ class BatchPDFProcessorGUI:
                         ).items()
                     },
                 },
+                "gpu_last_recommendation": (
+                    self.gpu_run_recommendation
+                    if isinstance(self.gpu_run_recommendation, dict)
+                    else None
+                ),
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
             temp_path = self.user_config_path.with_suffix(".json.tmp")
@@ -810,6 +844,7 @@ class BatchPDFProcessorGUI:
             finally:
                 self._gpu_detection_in_progress = False
                 self._post_ui(self._refresh_gpu_summary_label)
+                self._post_ui(self._update_gpu_recommendation_ui)
                 if open_settings_after and self.detected_gpus:
                     self._post_ui(self.open_gpu_parallel_settings)
 
@@ -818,6 +853,303 @@ class BatchPDFProcessorGUI:
             daemon=True,
             name="PaperMiner-GPU-Detect",
         ).start()
+
+    @staticmethod
+    def _find_nvidia_smi() -> 'str | None':
+        """Resolve nvidia-smi without depending on the launcher's PATH."""
+        candidates = [
+            shutil.which("nvidia-smi.exe"),
+            shutil.which("nvidia-smi"),
+        ]
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        candidates.append(str(Path(system_root) / "System32" / "nvidia-smi.exe"))
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                return str(Path(candidate))
+        return None
+
+    def _set_gpu_recommendation_sampling_ui(self):
+        label = getattr(self, "gpu_recommendation_label", None)
+        if label is not None:
+            label.config(text="本轮正在采样 GPU；完成后生成下一次运行建议。")
+        button = getattr(self, "apply_gpu_recommendation_button", None)
+        if button is not None:
+            button.config(state="disabled")
+
+    def _start_gpu_run_monitor(self, assignments: List[dict]):
+        """Low-frequency nvidia-smi sampling for one full-processing run."""
+        previous_stop = getattr(self, "_gpu_monitor_stop_event", None)
+        previous_thread = getattr(self, "_gpu_monitor_thread", None)
+        if previous_stop is not None:
+            previous_stop.set()
+        if previous_thread is not None and previous_thread.is_alive():
+            previous_thread.join(timeout=1.0)
+
+        clean_assignments = []
+        for item in assignments or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                gpu_id = int(item.get("index", -1))
+            except (TypeError, ValueError):
+                continue
+            if gpu_id < 0:
+                continue
+            clean_item = dict(item)
+            clean_item["index"] = gpu_id
+            clean_assignments.append(clean_item)
+        if not clean_assignments:
+            with self._gpu_monitor_lock:
+                self._gpu_monitor_run_id += 1
+                self._gpu_monitor_stop_event = None
+                self._gpu_monitor_thread = None
+                self._gpu_monitor_assignments = []
+                self._gpu_monitor_samples = {}
+                self._gpu_monitor_job_stats = {}
+                self._gpu_monitor_error = ""
+            return
+
+        with self._gpu_monitor_lock:
+            self._gpu_monitor_run_id += 1
+            run_id = self._gpu_monitor_run_id
+            self._gpu_monitor_assignments = clean_assignments
+            self._gpu_monitor_samples = {
+                int(item["index"]): [] for item in clean_assignments
+            }
+            self._gpu_monitor_job_stats = {
+                int(item["index"]): {
+                    "started": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "oom_count": 0,
+                    "native_crash_count": 0,
+                    "total_seconds": 0.0,
+                }
+                for item in clean_assignments
+            }
+            self._gpu_monitor_error = ""
+            stop_event = threading.Event()
+            self._gpu_monitor_stop_event = stop_event
+
+        self._set_gpu_recommendation_sampling_ui()
+        nvidia_smi = self._find_nvidia_smi()
+        if not nvidia_smi:
+            with self._gpu_monitor_lock:
+                self._gpu_monitor_error = "未找到 nvidia-smi，无法读取运行期 GPU 指标"
+            self.log("GPU 智能建议: 未找到 nvidia-smi，本轮只保留当前并发。")
+            return
+
+        selected_ids = {int(item["index"]) for item in clean_assignments}
+
+        def monitor():
+            creation_flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if sys.platform == "win32"
+                else 0
+            )
+            error_logged = False
+            while not stop_event.is_set():
+                try:
+                    result = subprocess.run(
+                        [
+                            nvidia_smi,
+                            "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=8,
+                        creationflags=creation_flags,
+                    )
+                    if result.returncode != 0:
+                        details = (result.stderr or result.stdout).strip()
+                        raise RuntimeError(details or f"退出代码 {result.returncode}")
+                    rows = parse_nvidia_smi_csv(result.stdout)
+                    if not rows:
+                        raise RuntimeError("nvidia-smi 未返回可解析的 GPU 指标")
+                    with self._gpu_monitor_lock:
+                        if run_id != self._gpu_monitor_run_id:
+                            return
+                        for row in rows:
+                            gpu_id = int(row["index"])
+                            if gpu_id not in selected_ids:
+                                continue
+                            bucket = self._gpu_monitor_samples.setdefault(gpu_id, [])
+                            bucket.append(dict(row))
+                            # Four hours at a two-second interval is already ample evidence.
+                            if len(bucket) > 7200:
+                                del bucket[: len(bucket) - 7200]
+                except Exception as exc:
+                    with self._gpu_monitor_lock:
+                        if run_id != self._gpu_monitor_run_id:
+                            return
+                        self._gpu_monitor_error = str(exc)
+                    if not error_logged:
+                        self.log(f"GPU 运行期采样暂不可用: {exc}")
+                        error_logged = True
+                stop_event.wait(2.0)
+
+        thread = threading.Thread(
+            target=monitor,
+            daemon=True,
+            name="PaperMiner-GPU-Telemetry",
+        )
+        self._gpu_monitor_thread = thread
+        thread.start()
+
+    def _record_gpu_job_result(
+        self,
+        gpu_id: 'int | None',
+        succeeded: bool,
+        issue_code: 'str | None',
+        elapsed_seconds: float,
+    ):
+        if gpu_id is None:
+            return
+        with self._gpu_monitor_lock:
+            stats = self._gpu_monitor_job_stats.get(int(gpu_id))
+            if stats is None:
+                return
+            stats["started"] += 1
+            stats["succeeded" if succeeded else "failed"] += 1
+            stats["total_seconds"] += max(0.0, float(elapsed_seconds))
+            if issue_code == "cuda_oom":
+                stats["oom_count"] += 1
+            if issue_code == "mineru_native_crash":
+                stats["native_crash_count"] += 1
+
+    def _finish_gpu_run_monitor(self, run_stopped: bool = False):
+        stop_event = getattr(self, "_gpu_monitor_stop_event", None)
+        thread = getattr(self, "_gpu_monitor_thread", None)
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+        with self._gpu_monitor_lock:
+            assignments = [dict(item) for item in self._gpu_monitor_assignments]
+            samples = {
+                int(key): [dict(sample) for sample in value]
+                for key, value in self._gpu_monitor_samples.items()
+            }
+            job_stats = {
+                int(key): dict(value)
+                for key, value in self._gpu_monitor_job_stats.items()
+            }
+            monitor_error = self._gpu_monitor_error
+            # Invalidate a monitor that is still returning from nvidia-smi and
+            # clear the large raw sample buffers after taking the summary copy.
+            self._gpu_monitor_run_id += 1
+            self._gpu_monitor_stop_event = None
+            self._gpu_monitor_thread = None
+            self._gpu_monitor_assignments = []
+            self._gpu_monitor_samples = {}
+            self._gpu_monitor_job_stats = {}
+            self._gpu_monitor_error = ""
+
+        if not assignments:
+            self._update_gpu_recommendation_ui()
+            return None
+
+        recommendation = build_gpu_recommendation(
+            assignments,
+            samples,
+            job_stats,
+            monitor_error=monitor_error,
+            run_stopped=run_stopped,
+        )
+        self.gpu_run_recommendation = recommendation
+        self._save_directory_preferences()
+        self.log("=== 下一次运行 GPU 智能建议 ===")
+        self.log(f"建议计划: {recommendation.get('plan_text', '暂无')}")
+        for item in recommendation.get("per_gpu", []):
+            evidence = (
+                f"平均利用率 {item.get('avg_utilization', 0):g}% / "
+                f"峰值利用率 {item.get('peak_utilization', 0):g}% / "
+                f"显存峰值 {item.get('peak_memory_mib', 0) / 1024:.1f}"
+                f"/{item.get('memory_total_mib', 0) / 1024:.1f} GiB"
+            )
+            self.log(
+                f"GPU {item.get('index')}: {item.get('current_workers')} -> "
+                f"{item.get('recommended_workers')}；{evidence}；"
+                f"{item.get('reason')}"
+            )
+        if monitor_error:
+            self.log(f"采样提示: {monitor_error}")
+        self._update_gpu_recommendation_ui()
+        return recommendation
+
+    def _gpu_recommendation_text(self) -> str:
+        recommendation = getattr(self, "gpu_run_recommendation", None)
+        if not isinstance(recommendation, dict) or not recommendation.get("per_gpu"):
+            return "下一轮 GPU 建议：完成一次 GPU 批处理后生成。"
+        evidence = recommendation_evidence_text(recommendation)
+        plan = recommendation.get("plan_text", "暂无")
+        return f"下一轮 GPU 建议：{plan}\n{evidence}" if evidence else f"下一轮 GPU 建议：{plan}"
+
+    def _update_gpu_recommendation_ui(self):
+        label = getattr(self, "gpu_recommendation_label", None)
+        if label is not None:
+            label.config(text=self._gpu_recommendation_text())
+        button = getattr(self, "apply_gpu_recommendation_button", None)
+        if button is not None:
+            available = bool(
+                isinstance(getattr(self, "gpu_run_recommendation", None), dict)
+                and self.gpu_run_recommendation.get("per_gpu")
+                and getattr(self, "_gpu_detection_completed", False)
+                and not self.is_processing
+            )
+            button.config(state="normal" if available else "disabled")
+
+    def _apply_gpu_recommendation(self):
+        if self.is_processing:
+            messagebox.showwarning(
+                "任务进行中",
+                "请等待本轮完成后再应用下一轮 GPU 建议。",
+                parent=self.root,
+            )
+            return
+        recommendation = getattr(self, "gpu_run_recommendation", None)
+        if not isinstance(recommendation, dict):
+            return
+        available_ids = {int(item["index"]) for item in self.detected_gpus}
+        selected_ids = []
+        tasks = {}
+        for item in recommendation.get("per_gpu", []):
+            try:
+                gpu_id = int(item["index"])
+                workers = max(1, min(4, int(item["recommended_workers"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if gpu_id in available_ids:
+                selected_ids.append(gpu_id)
+                tasks[gpu_id] = workers
+        if not selected_ids:
+            messagebox.showwarning(
+                "建议已失效",
+                "建议中的显卡当前不可用，请重新检测 GPU。",
+                parent=self.root,
+            )
+            return
+        evidence = recommendation_evidence_text(recommendation)
+        if not messagebox.askyesno(
+            "应用 GPU 智能建议",
+            f"建议计划：{recommendation.get('plan_text', '')}\n\n"
+            f"依据：{evidence or '本轮运行数据'}\n\n"
+            "只会修改下一轮每卡任务数，不会立即启动任务。是否应用？",
+            parent=self.root,
+        ):
+            return
+        self.gpu_parallel_preferences = {
+            "selected_gpu_ids": selected_ids,
+            "tasks_per_gpu": tasks,
+        }
+        self._save_directory_preferences()
+        self._refresh_gpu_summary_label()
+        self._update_gpu_recommendation_ui()
+        self.log(f"已应用下一轮 GPU 建议: {self._format_gpu_plan(self._resolve_gpu_assignments())}")
 
     def open_gpu_parallel_settings(self, force_refresh: bool = False):
         """配置启用的 GPU 以及每张卡并行运行的 MinerU 任务数。"""
@@ -1134,6 +1466,9 @@ class BatchPDFProcessorGUI:
             return
         self._closing = True
         self.is_processing = False
+        monitor_stop = getattr(self, "_gpu_monitor_stop_event", None)
+        if monitor_stop is not None:
+            monitor_stop.set()
         self._terminate_active_mineru()
         self._close_log_file()
         self.root.destroy()
@@ -1708,6 +2043,47 @@ class BatchPDFProcessorGUI:
             style='Muted.TLabel',
             wraplength=240,
         ).grid(row=4, column=0, sticky=tk.W, pady=(14, 0))
+
+        recommendation_frame = ttk.Labelframe(
+            progress_frame,
+            text='GPU 智能推荐',
+            padding=(9, 7),
+            bootstyle='secondary',
+        )
+        recommendation_frame.grid(
+            row=5,
+            column=0,
+            sticky=(tk.W, tk.E),
+            pady=(11, 0),
+        )
+        recommendation_frame.grid_columnconfigure(0, weight=1)
+        self.gpu_recommendation_label = ttk.Label(
+            recommendation_frame,
+            text=self._gpu_recommendation_text(),
+            style='Muted.TLabel',
+            wraplength=265,
+            justify=tk.LEFT,
+        )
+        self.gpu_recommendation_label.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        self.apply_gpu_recommendation_button = ttk.Button(
+            recommendation_frame,
+            text='应用到下一轮',
+            command=self._apply_gpu_recommendation,
+            state=(
+                'normal'
+                if isinstance(self.gpu_run_recommendation, dict)
+                and self.gpu_run_recommendation.get('per_gpu')
+                and self._gpu_detection_completed
+                else 'disabled'
+            ),
+            bootstyle='secondary outline',
+        )
+        self.apply_gpu_recommendation_button.grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            pady=(7, 0),
+        )
 
         output_frame = ttk.Labelframe(
             task_board, text='输出操作', padding=12, bootstyle='secondary'
@@ -2538,6 +2914,26 @@ class BatchPDFProcessorGUI:
             self.use_gpu_var.set(True)
             self.backend_combo.config(state='readonly')
 
+    def _reset_task_board_for_run(self, total_items: int, mode: str):
+        """Reset every visible board value before the worker thread starts."""
+        total = max(0, int(total_items))
+        self.progress_var.set(0.0)
+        self.status_label.config(
+            text=f"正在准备 · 0 / {total}",
+            foreground=self.accent_color,
+        )
+        self.progress_text.config(
+            text=(
+                "正在检查 GPU 与 MinerU 运行环境…"
+                if mode == "full"
+                else "正在准备已有 raw 结果…"
+            )
+        )
+        self.update_stats()
+        # Paint the reset synchronously so a slow environment precheck never
+        # leaves the previous run's 100% board visible.
+        self.root.update_idletasks()
+
     def start_processing(self):
         """开始处理"""
         mode = self.process_mode_var.get()
@@ -2606,6 +3002,17 @@ class BatchPDFProcessorGUI:
                 )
             else:
                 gpu_desc = "CPU 模式"
+            recommendation = getattr(self, "gpu_run_recommendation", None)
+            recommendation_note = ""
+            if (
+                self._run_option("use_gpu", True)
+                and isinstance(recommendation, dict)
+                and recommendation.get("per_gpu")
+            ):
+                recommendation_note = (
+                    f"\n上轮智能建议：{recommendation.get('plan_text', '暂无')}"
+                    "\n（如需使用，请先在任务看板点击‘应用到下一轮’）"
+                )
 
             # 计算跳过数量
             if self.skip_processed_var.get():
@@ -2622,13 +3029,13 @@ class BatchPDFProcessorGUI:
                     f"将跳过: {skip_count} 个 (已有处理结果)\n"
                     f"实际处理: {actual_count} 个\n\n"
                     f"提取项目：{extract_desc}\n"
-                    f"计算计划：{gpu_desc}\n\n是否继续？"
+                    f"计算计划：{gpu_desc}{recommendation_note}\n\n是否继续？"
                 )
             else:
                 confirm_msg = (
                     f"将完整处理 {len(pdf_files)} 个 PDF 文件。\n\n"
                     f"提取项目：{extract_desc}\n"
-                    f"计算计划：{gpu_desc}\n\n"
+                    f"计算计划：{gpu_desc}{recommendation_note}\n\n"
                     f"这将运行 MinerU 并提取内容。\n\n是否继续？"
                 )
 
@@ -2715,8 +3122,16 @@ class BatchPDFProcessorGUI:
         self.failed_count = 0
         self.skipped_count = 0
 
-        # 更新统计显示
-        self.update_stats()
+        # 进度条、状态文字与三个统计必须在启动后台预检前同步归零。
+        self._reset_task_board_for_run(self.total_pdfs, mode)
+        monitor_assignments = (
+            self._run_option("gpu_assignments", [])
+            if mode == "full" and self._run_option("use_gpu", False)
+            else []
+        )
+        self._start_gpu_run_monitor(monitor_assignments)
+        self._update_gpu_recommendation_ui()
+        self._refresh_gpu_summary_label()
 
         # 在后台线程中处理
         if mode == "full":
@@ -2829,6 +3244,9 @@ class BatchPDFProcessorGUI:
             self.log(f"[{i + 1}/{len(pdf_files)}] 处理: {pdf_file.name}")
             self.log("=" * 60)
             job_id = f"sequential-{i + 1}"
+            raw_dir = None
+            issue_code = None
+            gpu_job_started_at = time.monotonic() if bind_gpu else None
             if bind_gpu:
                 self._set_thread_log_prefix(f"[GPU {gpu_id}] ")
             try:
@@ -2867,6 +3285,13 @@ class BatchPDFProcessorGUI:
                         self._advance_batch_progress()
                         break
             finally:
+                if bind_gpu and gpu_job_started_at is not None:
+                    self._record_gpu_job_result(
+                        gpu_id,
+                        raw_dir is not None,
+                        issue_code,
+                        time.monotonic() - gpu_job_started_at,
+                    )
                 self._clear_thread_log_prefix()
                 if bind_gpu:
                     self._set_mineru_issue(job_id, None)
@@ -2910,6 +3335,9 @@ class BatchPDFProcessorGUI:
                 except queue.Empty:
                     return
                 pdf_file = job["pdf_file"]
+                gpu_job_started_at = None
+                raw_dir = None
+                issue_code = None
                 try:
                     if not self.is_processing or fatal_event.is_set():
                         result_queue.put({**job, "cancelled": True, "gpu_id": gpu_id})
@@ -2923,6 +3351,7 @@ class BatchPDFProcessorGUI:
                         f"[{job['position']}/{len(pdf_files)}] 处理: {pdf_file.name}"
                     )
                     self.log("=" * 60)
+                    gpu_job_started_at = time.monotonic()
                     raw_dir = self.run_mineru(
                         pdf_file,
                         gpu_id=gpu_id,
@@ -2941,6 +3370,7 @@ class BatchPDFProcessorGUI:
                         }
                     )
                 except Exception as exc:
+                    issue_code = "scheduler_worker_failed"
                     self.log(f"❌ GPU 工作槽异常: {exc}")
                     self.log(traceback.format_exc())
                     result_queue.put(
@@ -2949,10 +3379,17 @@ class BatchPDFProcessorGUI:
                             "cancelled": False,
                             "gpu_id": gpu_id,
                             "raw_dir": None,
-                            "issue_code": "scheduler_worker_failed",
+                            "issue_code": issue_code,
                         }
                     )
                 finally:
+                    if gpu_job_started_at is not None:
+                        self._record_gpu_job_result(
+                            gpu_id,
+                            raw_dir is not None,
+                            issue_code,
+                            time.monotonic() - gpu_job_started_at,
+                        )
                     self._set_mineru_issue(job["job_id"], None)
                     self._clear_thread_log_prefix()
                     parse_queue.task_done()
@@ -3367,6 +3804,9 @@ class BatchPDFProcessorGUI:
 
                 diagnosis = self.diagnose_mineru_output(output_tail)
                 if diagnosis:
+                    # Prefer a precise recoverable diagnosis (especially OOM)
+                    # over the worker's generic non-zero exit classification.
+                    self._set_mineru_issue(job_id, diagnosis.get("code"))
                     self.log_mineru_diagnosis(diagnosis, output_tail)
                 return None
 
@@ -3762,9 +4202,12 @@ class BatchPDFProcessorGUI:
 
     def processing_complete(self):
         """处理完成"""
+        run_stopped = not self.is_processing
         self.is_processing = False
         self.start_button.config(state='normal')
         self.stop_button.config(state='disabled')
+        self._finish_gpu_run_monitor(run_stopped=run_stopped)
+        self._refresh_gpu_summary_label()
 
         # 更新状态标签（附 X / Y 进度计数）；清空副行的"正在提取…"文件名提示
         done = self.success_count + self.failed_count + self.skipped_count
