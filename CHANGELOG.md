@@ -1,5 +1,16 @@
 # PaperMiner 更新日志
 
+## v1.4.17 (2026-08-30)
+
+- 新增 SQLite WAL 持久化批次日志，每篇 PDF 在 `pending / parsing / raw_validated / extracting / complete` 阶段更新恢复点；状态保存在 `%LOCALAPPDATA%\PaperMiner\recovery\runs.db`。
+- 每篇文献完成后原子写入 `extract/<论文>/.paperminer-complete.json`；只有来源文件指纹和输出选项仍匹配时才视为已完成，避免将闪退留下的半成品误判为成功。
+- `PaperMiner.exe` 监护到 GUI 异常退出后，先通过 Windows 作业对象回收遗留 MinerU 进程，2 秒后自动重启并继续未完成批次。
+- 崩溃恢复以 PDF 为安全边界：已完成的不重跑，当时正在处理的那篇从头重跑；中断输出移到 `Recovery\Interrupted` 保留，不会删除。
+- 正常点击“停止”或关闭会暂停批次并回收 MinerU，下次启动可人工确认继续；不会把人工中止的当前 PDF 误记为永久失败。
+- 新增崩溃循环保护：10 分钟内连续异常退出 3 次后停止自动重启，保留批次现场并提示核查 `%LOCALAPPDATA%\PaperMiner\logs\PaperMiner-launcher-error.log`。
+
+---
+
 ## v1.4.16 (2026-08-30)
 
 - 修复完成一轮后再次运行时，任务看板仍显示上一轮“处理完成”、100% 进度和旧文件提示的问题；新一轮后台预检开始前会同步重置状态、进度和成功/失败/跳过统计。

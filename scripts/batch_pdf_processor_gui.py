@@ -42,6 +42,7 @@ _STARTUP_MESSAGES = []
 # PaperMiner.exe 使用 pythonw.exe 直接启动本脚本。运行环境在导入 MinerU
 # 或 PyTorch 前完成初始化，不再依赖 PowerShell 修改环境变量。
 _PAPERMINER_DIRECT_LAUNCH = "--paperminer-launcher" in sys.argv
+_PAPERMINER_CRASH_RECOVERY = "--recover-after-crash" in sys.argv
 _RUNTIME_PATH = Path(sys.executable).resolve().parent
 _RUNTIME_PATH_ENTRIES = [
     _RUNTIME_PATH,
@@ -60,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.16"
+    __version__ = "1.4.17"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -121,6 +122,23 @@ except ImportError:
         build_gpu_recommendation,
         parse_nvidia_smi_csv,
         recommendation_evidence_text,
+    )
+
+try:
+    from run_recovery import (
+        INFLIGHT_DOCUMENT_STATES,
+        MARKER_NAME,
+        RunRecoveryStore,
+        completion_marker_matches,
+        write_completion_marker,
+    )
+except ImportError:
+    from scripts.run_recovery import (
+        INFLIGHT_DOCUMENT_STATES,
+        MARKER_NAME,
+        RunRecoveryStore,
+        completion_marker_matches,
+        write_completion_marker,
     )
 
 # 设置标准输出编码为 UTF-8。
@@ -478,6 +496,22 @@ class BatchPDFProcessorGUI:
         self._fault_handler_enabled = False
         self._initialize_file_logging()
 
+        # 批次状态写入安装目录之外的 SQLite WAL。GUI/系统异常退出后，
+        # 已提交的单篇状态仍可恢复；安装覆盖不会删除该数据库。
+        self.run_recovery_store = None
+        self.active_run_id = None
+        self._run_started_from_recovery = False
+        self._batch_had_unhandled_error = False
+        self._checkpoint_failure = False
+        self._resume_prompt_shown = False
+        self._pending_resume_run_id = None
+        self._resume_in_progress = False
+        try:
+            recovery_database = self.user_config_path.parent / "recovery" / "runs.db"
+            self.run_recovery_store = RunRecoveryStore(recovery_database)
+        except Exception as exc:
+            _STARTUP_MESSAGES.append(f"错误: 无法初始化批次恢复数据库: {exc}")
+
         # Tk 只能由主线程操作。后台处理和 loguru 回调只向此队列投递任务，
         # 主线程定时消费，避免长批次中的跨线程 Tcl 调用导致随机退出。
         self._ui_queue = queue.Queue()
@@ -544,6 +578,7 @@ class BatchPDFProcessorGUI:
         # 首次运行环境检测（延迟执行，避免阻塞 UI 启动）
         self.root.after(500, self.check_environment)
         self.root.after(800, self._start_gpu_detection)
+        self.root.after(1500, self._offer_unfinished_run_recovery)
 
     def _load_directory_preferences(self):
         """读取用户选择的输入/输出目录；损坏配置自动回退到安装目录默认值。"""
@@ -1457,6 +1492,434 @@ class BatchPDFProcessorGUI:
     def _run_option(self, name, default=None):
         return self._active_run_options.get(name, default)
 
+    def _checkpoint_document(
+        self,
+        source_path,
+        status: str,
+        *,
+        increment_attempt: bool = False,
+        gpu_id=None,
+        raw_directory=None,
+        issue_code=None,
+        error_text: str = "",
+    ) -> bool:
+        """Commit one document transition before the scheduler continues."""
+        store = getattr(self, "run_recovery_store", None)
+        run_id = getattr(self, "active_run_id", None)
+        if store is None or not run_id:
+            return True
+        try:
+            store.transition_document(
+                run_id,
+                source_path,
+                status,
+                increment_attempt=increment_attempt,
+                gpu_id=gpu_id,
+                raw_directory=raw_directory,
+                issue_code=issue_code,
+                error_text=error_text,
+            )
+            return True
+        except Exception as exc:
+            self._checkpoint_failure = True
+            self.is_processing = False
+            self.log(f"[ERROR] 批次恢复状态写入失败，已停止启动新任务: {exc}")
+            return False
+
+    def _finalize_document_success(self, source_path, pdf_name: str) -> bool:
+        """Publish the completion marker before committing ``complete``."""
+        extract_directory = self.extract_output_path / pdf_name
+        try:
+            marker = write_completion_marker(
+                extract_directory,
+                run_id=self.active_run_id,
+                source_path=source_path,
+                options=self._active_run_options,
+            )
+            self.log(f"完成标记: {marker}")
+        except Exception as exc:
+            self.log(f"[ERROR] 无法写入完成标记，本篇不会被视为完成: {exc}")
+            self._checkpoint_document(
+                source_path,
+                "failed",
+                issue_code="completion_marker_failed",
+                error_text=str(exc),
+            )
+            return False
+        return self._checkpoint_document(source_path, "complete")
+
+    def _pause_active_run(self, reason: str):
+        store = getattr(self, "run_recovery_store", None)
+        run_id = getattr(self, "active_run_id", None)
+        if store is None or not run_id:
+            return
+        try:
+            store.set_run_status(run_id, "paused", reason)
+        except Exception as exc:
+            self.log(f"[WARN] 无法保存批次暂停状态: {exc}")
+
+    def _finish_active_run_state(self, run_stopped: bool):
+        store = getattr(self, "run_recovery_store", None)
+        run_id = getattr(self, "active_run_id", None)
+        if store is None or not run_id:
+            return None, {}
+        try:
+            summary = store.summary(run_id)
+            unfinished = int(summary.get("unfinished", 0))
+            if unfinished == 0:
+                status = "completed"
+                error = ""
+            elif (
+                run_stopped
+                and not self._batch_had_unhandled_error
+                and not self._checkpoint_failure
+            ):
+                status = "paused"
+                error = "User stopped or closed the active batch."
+            else:
+                status = "interrupted"
+                error = (
+                    "Checkpoint persistence failed."
+                    if self._checkpoint_failure
+                    else "The batch ended before all registered documents reached a terminal state."
+                )
+            store.set_run_status(run_id, status, error)
+            if status == "completed":
+                self.active_run_id = None
+            return status, summary
+        except Exception as exc:
+            self.log(f"[ERROR] 无法完成批次恢复状态: {exc}")
+            return "interrupted", {}
+
+    def _offer_unfinished_run_recovery(self):
+        """Resume automatically after a launcher restart; otherwise ask once."""
+        if self.is_processing or self._resume_prompt_shown:
+            return
+        store = getattr(self, "run_recovery_store", None)
+        if store is None:
+            return
+        try:
+            run = store.latest_resumable_run()
+        except Exception as exc:
+            self.log(f"[WARN] 无法读取未完成批次: {exc}")
+            return
+        if not run:
+            return
+
+        self._resume_prompt_shown = True
+        summary = store.summary(run["run_id"])
+        unfinished = int(summary.get("unfinished", 0))
+        if unfinished <= 0:
+            store.set_run_status(run["run_id"], "completed")
+            return
+
+        automatic = (
+            _PAPERMINER_CRASH_RECOVERY
+            and run.get("status") in ("running", "interrupted")
+        )
+        if automatic:
+            self.log(
+                f"检测到应用异常退出，自动恢复批次 {run['run_id']}；"
+                f"待处理 {unfinished} 篇。"
+            )
+            self._resume_persisted_run(run["run_id"])
+            return
+
+        if messagebox.askyesno(
+            "发现未完成批次",
+            f"检测到一个未完成的 PaperMiner 批次。\n\n"
+            f"创建时间：{run.get('created_at', '')}\n"
+            f"输入目录：{run.get('input_directory', '')}\n"
+            f"尚未完成：{unfinished} / {summary.get('total', 0)}\n\n"
+            "是否从未完成的文献继续？\n"
+            "正在处理时中断的文献会重新开始，已完成文献不会重跑。",
+            parent=self.root,
+        ):
+            self._resume_persisted_run(run["run_id"])
+        else:
+            try:
+                store.set_run_status(
+                    run["run_id"],
+                    "paused",
+                    "The user postponed recovery.",
+                )
+            except Exception:
+                pass
+            self.log(f"已暂缓恢复批次 {run['run_id']}，下次启动仍可继续。")
+
+    def _apply_persisted_run_options(self, run: dict):
+        options = run.get("options") if isinstance(run.get("options"), dict) else {}
+        self.input_path = Path(run["input_directory"])
+        self.output_path = Path(run["output_directory"])
+        self._update_output_paths()
+
+        mode = str(run.get("mode") or "full")
+        self.process_mode_var.set(mode)
+        # Configure widget availability first.  ``on_mode_change`` applies a
+        # default GPU value for full mode, so persisted choices must be
+        # restored after it rather than overwritten by it.
+        self.on_mode_change()
+        option_variables = {
+            "extract_text": self.extract_text_var,
+            "extract_formula": self.extract_formula_var,
+            "extract_figures": self.extract_figures_var,
+            "extract_tables": self.extract_tables_var,
+            "extract_sections": self.extract_sections_var,
+            "extract_open_source": self.extract_open_source_var,
+            "use_gpu": self.use_gpu_var,
+            "skip_processed": self.skip_processed_var,
+        }
+        for key, variable in option_variables.items():
+            if key in options:
+                variable.set(bool(options[key]))
+        if options.get("backend"):
+            self.backend_var.set(str(options["backend"]))
+        if options.get("llm_model"):
+            self.llm_model_var.set(str(options["llm_model"]))
+
+        assignments = options.get("gpu_assignments", [])
+        selected_ids = []
+        tasks = {}
+        for assignment in assignments if isinstance(assignments, list) else []:
+            if not isinstance(assignment, dict):
+                continue
+            try:
+                gpu_id = int(assignment["index"])
+                workers = max(1, min(4, int(assignment.get("workers", 1))))
+            except (KeyError, TypeError, ValueError):
+                continue
+            selected_ids.append(gpu_id)
+            tasks[gpu_id] = workers
+        if selected_ids:
+            self.gpu_parallel_preferences = {
+                "selected_gpu_ids": selected_ids,
+                "tasks_per_gpu": tasks,
+            }
+
+        self._refresh_directory_labels()
+        self.check_input_folder()
+        self._refresh_gpu_summary_label()
+
+    @staticmethod
+    def _path_is_within(candidate: Path, parent: Path) -> bool:
+        try:
+            candidate_resolved = candidate.resolve(strict=False)
+            parent_resolved = parent.resolve(strict=False)
+            return os.path.commonpath(
+                (str(candidate_resolved), str(parent_resolved))
+            ) == str(parent_resolved)
+        except (OSError, ValueError):
+            return False
+
+    def _quarantine_interrupted_document(
+        self,
+        run_id: str,
+        source_path: Path,
+        pdf_name: str,
+        raw_directory=None,
+    ):
+        """Move interrupted output aside; never delete recovery evidence."""
+        safe_to_retry = True
+        recovery_root = (
+            self.output_path
+            / "Recovery"
+            / "Interrupted"
+            / f"{run_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+        )
+        candidates = [
+            ("extract", self.extract_output_path / pdf_name, self.extract_output_path),
+            ("raw", self.raw_output_path / pdf_name, self.raw_output_path),
+        ]
+        if raw_directory:
+            raw_candidate = Path(raw_directory)
+            if raw_candidate.name.lower() == "auto":
+                raw_candidate = raw_candidate.parent
+            candidates.append(("raw", raw_candidate, self.raw_output_path))
+
+        seen = set()
+        for kind, candidate, protected_root in candidates:
+            key = os.path.normcase(str(candidate.resolve(strict=False)))
+            if key in seen or not candidate.exists():
+                continue
+            seen.add(key)
+            if candidate.is_symlink() or not self._path_is_within(candidate, protected_root):
+                self.log(f"[WARN] 未移动边界外或重解析的中断目录: {candidate}")
+                safe_to_retry = False
+                continue
+            destination_directory = recovery_root / kind
+            destination_directory.mkdir(parents=True, exist_ok=True)
+            destination = destination_directory / candidate.name
+            if destination.exists():
+                destination = destination.with_name(
+                    f"{destination.name}_{int(time.time())}_{os.getpid()}"
+                )
+            try:
+                shutil.move(str(candidate), str(destination))
+                self.log(f"中断输出已保留: {candidate} -> {destination}")
+            except OSError as exc:
+                safe_to_retry = False
+                self.log(f"[WARN] 无法隔离中断输出，已取消本篇自动重试: {exc}")
+        return safe_to_retry
+
+    def _resume_persisted_run(self, run_id: str):
+        if self.is_processing or self._resume_in_progress:
+            return
+        store = getattr(self, "run_recovery_store", None)
+        if store is None:
+            return
+        run = store.get_run(run_id)
+        if not run:
+            return
+
+        options = run.get("options") if isinstance(run.get("options"), dict) else {}
+        if (
+            bool(options.get("use_gpu", False))
+            and not getattr(self, "_gpu_detection_completed", False)
+        ):
+            self._pending_resume_run_id = run_id
+            self.root.after(500, lambda: self._resume_persisted_run(run_id))
+            return
+
+        self._resume_in_progress = True
+        self._pending_resume_run_id = None
+        try:
+            self._apply_persisted_run_options(run)
+            self._active_run_options = dict(options)
+            self.active_run_id = run_id
+            documents = store.prepare_resume(run_id)
+            mode = str(run.get("mode") or "full")
+            resume_items = []
+
+            for document in documents:
+                source = Path(document["source_path"])
+                pdf_name = source.stem if mode == "full" else source.name
+                previous_status = document.get("previous_status", "pending")
+                extract_directory = self.extract_output_path / pdf_name
+
+                if completion_marker_matches(
+                    extract_directory,
+                    options,
+                    source_path=source,
+                ):
+                    store.transition_document(run_id, source, "complete")
+                    self.log(f"恢复核查: 完成标记有效，跳过 {source.name}")
+                    continue
+
+                if (
+                    previous_status == "pending"
+                    and bool(options.get("skip_processed", True))
+                    and self.is_already_processed(pdf_name)
+                ):
+                    store.transition_document(run_id, source, "skipped")
+                    self.log(f"恢复核查: 已有完整结果，跳过 {source.name}")
+                    continue
+
+                if previous_status in INFLIGHT_DOCUMENT_STATES:
+                    if not self._quarantine_interrupted_document(
+                        run_id,
+                        source,
+                        pdf_name,
+                        raw_directory=document.get("raw_directory"),
+                    ):
+                        store.transition_document(
+                            run_id,
+                            source,
+                            "failed",
+                            issue_code="recovery_quarantine_failed",
+                            error_text=(
+                                "Interrupted output could not be isolated safely; "
+                                "automatic retry was refused."
+                            ),
+                        )
+                        continue
+
+                if not source.exists():
+                    store.transition_document(
+                        run_id,
+                        source,
+                        "failed",
+                        issue_code="source_missing_on_resume",
+                        error_text="The source path no longer exists.",
+                    )
+                    self.log(f"[WARN] 恢复时源文件不存在，记为失败: {source}")
+                    continue
+                resume_items.append(source)
+
+            if not resume_items:
+                store.set_run_status(run_id, "completed")
+                self.active_run_id = None
+                self.log(f"批次 {run_id} 已无待处理文献。")
+                messagebox.showinfo(
+                    "恢复完成",
+                    "未完成批次已核查完毕，没有需要重新处理的文献。",
+                    parent=self.root,
+                )
+                return
+
+            # Paths and ordinary widgets have been restored; recapture only
+            # validated current hardware assignments, then force this filtered
+            # recovery list not to be skipped by legacy partial-output rules.
+            self._capture_run_options()
+            self._active_run_options["skip_processed"] = False
+            self._run_started_from_recovery = True
+            self._batch_had_unhandled_error = False
+            self._checkpoint_failure = False
+            self.is_processing = True
+            self.start_button.config(state="disabled")
+            self.stop_button.config(state="normal")
+            self.current_pdf_index = 0
+            self.total_pdfs = len(resume_items)
+            self.success_count = 0
+            self.failed_count = 0
+            self.skipped_count = 0
+            self._reset_task_board_for_run(self.total_pdfs, mode)
+            self.status_label.config(
+                text=f"正在恢复 · 0 / {self.total_pdfs}",
+                foreground=self.accent_color,
+            )
+            self.log(
+                f"=== 恢复批次 {run_id}：剩余 {len(resume_items)} 篇；"
+                "已完成文献不会重跑 ==="
+            )
+
+            monitor_assignments = (
+                self._run_option("gpu_assignments", [])
+                if mode == "full" and self._run_option("use_gpu", False)
+                else []
+            )
+            self._start_gpu_run_monitor(monitor_assignments)
+            self._update_gpu_recommendation_ui()
+            self._refresh_gpu_summary_label()
+
+            target = self.process_pdfs if mode == "full" else self.extract_from_raw
+            thread_name = (
+                "PaperMiner-PDF-Recovery"
+                if mode == "full"
+                else "PaperMiner-Raw-Recovery"
+            )
+            threading.Thread(
+                target=target,
+                args=(resume_items,),
+                daemon=True,
+                name=thread_name,
+            ).start()
+        except Exception as exc:
+            self._batch_had_unhandled_error = True
+            try:
+                store.set_run_status(run_id, "interrupted", str(exc))
+            except Exception:
+                pass
+            self.active_run_id = None
+            self.log(f"[ERROR] 无法恢复批次 {run_id}: {exc}")
+            self.log(traceback.format_exc())
+            messagebox.showerror(
+                "恢复失败",
+                f"无法恢复未完成批次：\n\n{exc}\n\n详细信息已写入日志。",
+                parent=self.root,
+            )
+        finally:
+            self._resume_in_progress = False
+
     def _on_close(self):
         if self.is_processing and not messagebox.askyesno(
             "任务仍在运行",
@@ -1464,6 +1927,8 @@ class BatchPDFProcessorGUI:
             parent=self.root,
         ):
             return
+        if self.is_processing:
+            self._pause_active_run("The user closed PaperMiner during an active batch.")
         self._closing = True
         self.is_processing = False
         monitor_stop = getattr(self, "_gpu_monitor_stop_event", None)
@@ -1471,6 +1936,12 @@ class BatchPDFProcessorGUI:
             monitor_stop.set()
         self._terminate_active_mineru()
         self._close_log_file()
+        store = getattr(self, "run_recovery_store", None)
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
         self.root.destroy()
 
     def _terminate_active_mineru(self, wait_timeout: float = 5.0):
@@ -2866,10 +3337,35 @@ class BatchPDFProcessorGUI:
         self.log_text.config(state='disabled')
 
     def is_already_processed(self, pdf_name: str) -> bool:
-        """检查PDF是否已经处理过（extract目录存在且包含文件）"""
+        """Only trust v1.4.17 output after its atomic completion marker."""
         extract_dir = self.extract_output_path / pdf_name
         if not extract_dir.exists():
             return False
+        marker_path = extract_dir / MARKER_NAME
+        if marker_path.exists():
+            mode = self.process_mode_var.get() if hasattr(self, "process_mode_var") else "full"
+            if mode == "extract_only":
+                source_path = self.raw_output_path / pdf_name
+            else:
+                source_path = self.input_path / f"{pdf_name}.pdf"
+                if not source_path.exists():
+                    source_path = next(
+                        (
+                            path
+                            for path in self.input_path.glob("*.pdf")
+                            if path.stem == pdf_name
+                        ),
+                        source_path,
+                    )
+            return completion_marker_matches(
+                extract_dir,
+                self._active_run_options,
+                source_path=source_path,
+            )
+
+        # Legacy outputs have no marker. Preserve backward compatibility for
+        # ordinary new runs, but recovery never applies this fallback to a
+        # document that was in-flight when the application stopped.
         # 升级后若用户勾选了新功能，旧输出目录必须完成 v2 代码/数据扫描。
         # 空结果只有 JSON 完成标记，不要求存在 Markdown 报告。
         if self._run_option("extract_open_source", False):
@@ -3111,6 +3607,34 @@ class BatchPDFProcessorGUI:
 
         # 更新界面状态
         self._capture_run_options()
+        if self.run_recovery_store is None:
+            messagebox.showerror(
+                "无法安全启动",
+                "批次恢复数据库不可用。为避免闪退后丢失队列，本次任务没有启动。\n\n"
+                "请查看日志并使用 Setup.exe 修复 PaperMiner。",
+                parent=self.root,
+            )
+            return
+        try:
+            self.active_run_id = self.run_recovery_store.create_run(
+                mode=mode,
+                input_directory=self.input_path,
+                output_directory=self.output_path,
+                options=self._active_run_options,
+                items=items_to_process,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "无法保存批次",
+                f"无法创建持久化批次，因此任务没有启动：\n\n{exc}",
+                parent=self.root,
+            )
+            self.log(f"[ERROR] 创建批次恢复记录失败: {exc}")
+            return
+
+        self._run_started_from_recovery = False
+        self._batch_had_unhandled_error = False
+        self._checkpoint_failure = False
         self.is_processing = True
         self.start_button.config(state='disabled')
         self.stop_button.config(state='normal')
@@ -3132,6 +3656,7 @@ class BatchPDFProcessorGUI:
         self._start_gpu_run_monitor(monitor_assignments)
         self._update_gpu_recommendation_ui()
         self._refresh_gpu_summary_label()
+        self.log(f"持久化批次: {self.active_run_id}")
 
         # 在后台线程中处理
         if mode == "full":
@@ -3151,6 +3676,7 @@ class BatchPDFProcessorGUI:
 
     def stop_processing(self):
         """停止处理"""
+        self._pause_active_run("The user pressed Stop.")
         self.is_processing = False
         self.log("\n⚠️  用户请求停止处理...")
         self._terminate_active_mineru()
@@ -3207,6 +3733,7 @@ class BatchPDFProcessorGUI:
             self._post_ui(self.processing_complete)
 
         except Exception as e:
+            self._batch_had_unhandled_error = True
             self.log(f"\n❌ 处理过程中发生错误: {str(e)}")
             import traceback
             self.log(traceback.format_exc())
@@ -3236,6 +3763,7 @@ class BatchPDFProcessorGUI:
                 and self.is_already_processed(pdf_file.stem)
             ):
                 self.skipped_count += 1
+                self._checkpoint_document(pdf_file, "skipped")
                 self.log(f"\n⏭ 跳过已处理: {pdf_file.name}")
                 self._advance_batch_progress()
                 continue
@@ -3250,6 +3778,13 @@ class BatchPDFProcessorGUI:
             if bind_gpu:
                 self._set_thread_log_prefix(f"[GPU {gpu_id}] ")
             try:
+                if not self._checkpoint_document(
+                    pdf_file,
+                    "parsing",
+                    increment_attempt=True,
+                    gpu_id=gpu_id if bind_gpu else None,
+                ):
+                    break
                 if bind_gpu:
                     raw_dir = self.run_mineru(
                         pdf_file,
@@ -3263,17 +3798,47 @@ class BatchPDFProcessorGUI:
                     issue_code = self.last_mineru_issue_code
 
                 if raw_dir is not None:
+                    self._checkpoint_document(
+                        pdf_file,
+                        "raw_validated",
+                        raw_directory=raw_dir,
+                    )
+                    self._checkpoint_document(
+                        pdf_file,
+                        "extracting",
+                        raw_directory=raw_dir,
+                    )
                     extract_ok = self.extract_and_organize(
                         pdf_file.stem,
                         raw_dir=raw_dir,
                     )
-                    if extract_ok:
+                    if extract_ok and self._finalize_document_success(
+                        pdf_file,
+                        pdf_file.stem,
+                    ):
                         self.success_count += 1
                         self.log(f"✅ 完成: {pdf_file.name}")
                     else:
+                        self._checkpoint_document(
+                            pdf_file,
+                            "failed",
+                            issue_code="extraction_failed",
+                            error_text="Extraction or completion-marker validation failed.",
+                        )
                         self.failed_count += 1
                         self.log(f"❌ 提取失败: {pdf_file.name}")
+                elif not self.is_processing:
+                    # Stop/close deliberately terminated MinerU.  Keep the
+                    # last durable state non-terminal so this PDF is offered
+                    # again instead of being recorded as a real failure.
+                    self.log(f"任务已暂停，保留恢复点: {pdf_file.name}")
                 else:
+                    self._checkpoint_document(
+                        pdf_file,
+                        "failed",
+                        issue_code=issue_code or "mineru_failed",
+                        error_text="MinerU did not produce a validated raw directory.",
+                    )
                     self.failed_count += 1
                     self.log(f"❌ 失败: {pdf_file.name}")
                     if issue_code in self.FATAL_MINERU_ISSUES:
@@ -3308,6 +3873,7 @@ class BatchPDFProcessorGUI:
                 and self.is_already_processed(pdf_file.stem)
             ):
                 self.skipped_count += 1
+                self._checkpoint_document(pdf_file, "skipped")
                 self.log(f"\n⏭ 跳过已处理: {pdf_file.name}")
                 self._advance_batch_progress()
                 continue
@@ -3351,6 +3917,16 @@ class BatchPDFProcessorGUI:
                         f"[{job['position']}/{len(pdf_files)}] 处理: {pdf_file.name}"
                     )
                     self.log("=" * 60)
+                    if not self._checkpoint_document(
+                        pdf_file,
+                        "parsing",
+                        increment_attempt=True,
+                        gpu_id=gpu_id,
+                    ):
+                        result_queue.put(
+                            {**job, "cancelled": True, "gpu_id": gpu_id}
+                        )
+                        continue
                     gpu_job_started_at = time.monotonic()
                     raw_dir = self.run_mineru(
                         pdf_file,
@@ -3360,6 +3936,25 @@ class BatchPDFProcessorGUI:
                     issue_code = self._get_mineru_issue(job["job_id"])
                     if issue_code in self.FATAL_MINERU_ISSUES:
                         fatal_event.set()
+                    if raw_dir is not None:
+                        self._checkpoint_document(
+                            pdf_file,
+                            "raw_validated",
+                            gpu_id=gpu_id,
+                            raw_directory=raw_dir,
+                        )
+                    elif not self.is_processing:
+                        # Stop/close deliberately terminated MinerU.  Preserve
+                        # ``parsing`` so the current PDF remains resumable.
+                        self.log(f"任务已暂停，保留恢复点: {pdf_file.name}")
+                    else:
+                        self._checkpoint_document(
+                            pdf_file,
+                            "failed",
+                            gpu_id=gpu_id,
+                            issue_code=issue_code or "mineru_failed",
+                            error_text="MinerU did not produce a validated raw directory.",
+                        )
                     result_queue.put(
                         {
                             **job,
@@ -3370,7 +3965,26 @@ class BatchPDFProcessorGUI:
                         }
                     )
                 except Exception as exc:
+                    if not self.is_processing:
+                        self.log(f"任务已暂停，保留恢复点: {pdf_file.name}")
+                        result_queue.put(
+                            {
+                                **job,
+                                "cancelled": True,
+                                "gpu_id": gpu_id,
+                                "raw_dir": None,
+                                "issue_code": None,
+                            }
+                        )
+                        continue
                     issue_code = "scheduler_worker_failed"
+                    self._checkpoint_document(
+                        pdf_file,
+                        "failed",
+                        gpu_id=gpu_id,
+                        issue_code=issue_code,
+                        error_text=str(exc),
+                    )
                     self.log(f"❌ GPU 工作槽异常: {exc}")
                     self.log(traceback.format_exc())
                     result_queue.put(
@@ -3411,12 +4025,32 @@ class BatchPDFProcessorGUI:
             try:
                 if not self.is_processing:
                     return "cancelled"
+                if not self._checkpoint_document(
+                    pdf_file,
+                    "extracting",
+                    raw_directory=result["raw_dir"],
+                ):
+                    return "cancelled"
                 ok = self.extract_and_organize(
                     pdf_file.stem,
                     raw_dir=result["raw_dir"],
                 )
-                return "success" if ok else "failed"
+                if ok and self._finalize_document_success(pdf_file, pdf_file.stem):
+                    return "success"
+                self._checkpoint_document(
+                    pdf_file,
+                    "failed",
+                    issue_code="extraction_failed",
+                    error_text="Extraction or completion-marker validation failed.",
+                )
+                return "failed"
             except Exception as exc:
+                self._checkpoint_document(
+                    pdf_file,
+                    "failed",
+                    issue_code="postprocess_worker_failed",
+                    error_text=str(exc),
+                )
                 self.log(f"❌ 提取任务异常: {exc}")
                 self.log(traceback.format_exc())
                 return "failed"
@@ -4071,6 +4705,7 @@ class BatchPDFProcessorGUI:
                 # 检查是否跳过已处理的文件
                 if self._run_option("skip_processed", True) and self.is_already_processed(pdf_name):
                     self.skipped_count += 1
+                    self._checkpoint_document(raw_folder, "skipped")
                     self.log(f"⏭ 跳过已处理: {pdf_name}")
                     self._post_ui(self.update_stats)
                     continue
@@ -4085,18 +4720,40 @@ class BatchPDFProcessorGUI:
                 self._post_ui(self.progress_text.config, text=f"正在提取：{pdf_name}")
 
                 try:
+                    if not self._checkpoint_document(
+                        raw_folder,
+                        "extracting",
+                        increment_attempt=True,
+                        raw_directory=raw_folder,
+                    ):
+                        break
                     # 提取内容（使用 PDF 名称作为参数）
                     extract_ok = self.extract_and_organize(pdf_name)
 
-                    if extract_ok:
+                    if extract_ok and self._finalize_document_success(
+                        raw_folder,
+                        pdf_name,
+                    ):
                         self.success_count += 1
                         self.log(f"✅ 完成: {pdf_name}")
                     else:
+                        self._checkpoint_document(
+                            raw_folder,
+                            "failed",
+                            issue_code="extraction_failed",
+                            error_text="Extraction or completion-marker validation failed.",
+                        )
                         self.failed_count += 1
                         self.log(f"❌ 提取失败: {pdf_name}")
                     self.log("")
 
                 except Exception as e:
+                    self._checkpoint_document(
+                        raw_folder,
+                        "failed",
+                        issue_code="extract_only_failed",
+                        error_text=str(e),
+                    )
                     self.failed_count += 1
                     self.log(f"❌ 失败: {pdf_name}")
                     self.log(f"   错误: {str(e)}")
@@ -4121,6 +4778,7 @@ class BatchPDFProcessorGUI:
             self._post_ui(self.processing_complete)
 
         except Exception as e:
+            self._batch_had_unhandled_error = True
             self.log(f"❌ 提取过程出错: {str(e)}")
             self._post_ui(self.processing_complete)
 
@@ -4208,12 +4866,24 @@ class BatchPDFProcessorGUI:
         self.stop_button.config(state='disabled')
         self._finish_gpu_run_monitor(run_stopped=run_stopped)
         self._refresh_gpu_summary_label()
+        run_status, recovery_summary = self._finish_active_run_state(run_stopped)
+        self._run_started_from_recovery = False
 
         # 更新状态标签（附 X / Y 进度计数）；清空副行的"正在提取…"文件名提示
         done = self.success_count + self.failed_count + self.skipped_count
         total = self.total_pdfs if self.total_pdfs else done
         progress_suffix = f" · {done} / {total}" if total else ""
-        if self.failed_count == 0:
+        if run_status == "paused":
+            self.status_label.config(
+                text=f"处理已暂停{progress_suffix}",
+                foreground='#f39c12'
+            )
+        elif run_status == "interrupted":
+            self.status_label.config(
+                text=f"处理已中断{progress_suffix}",
+                foreground='#e74c3c'
+            )
+        elif self.failed_count == 0:
             self.status_label.config(
                 text=f"处理完成{progress_suffix}",
                 foreground='#27ae60'
@@ -4241,13 +4911,25 @@ class BatchPDFProcessorGUI:
         if self.skipped_count > 0:
             summary_parts.append(f"跳过: {self.skipped_count} 个")
         summary_parts.append(f"总计: {self.total_pdfs} 个")
+        remaining = int(recovery_summary.get("unfinished", 0))
 
-        messagebox.showinfo(
-            "处理完成",
-            "批量处理完成！\n\n"
-            + "\n".join(summary_parts)
-            + f"\n\n结果已保存到：\n{self.extract_output_path}"
-        )
+        if run_status in ("paused", "interrupted"):
+            title = "处理已暂停" if run_status == "paused" else "处理未全部完成"
+            messagebox.showwarning(
+                title,
+                f"本批次仍有 {remaining} 篇未完成，恢复状态已经安全保存。\n\n"
+                + "\n".join(summary_parts)
+                + "\n\n下次启动 PaperMiner 时可继续；异常重启时会自动恢复。",
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo(
+                "处理完成",
+                "批量处理完成！\n\n"
+                + "\n".join(summary_parts)
+                + f"\n\n结果已保存到：\n{self.extract_output_path}",
+                parent=self.root,
+            )
 
     def extract_text(self, raw_dir: Path, extract_dir: Path, pdf_name: str) -> bool:
         """提取文字 (Markdown)，并修复图片引用路径。

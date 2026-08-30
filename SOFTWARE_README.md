@@ -1,4 +1,4 @@
-# PaperMiner 1.4.16 软件版
+# PaperMiner 1.4.17 软件版
 
 ## 发布与安装
 
@@ -27,6 +27,10 @@ GPU 阶段会列出每张 NVIDIA 显卡的型号、显存和驱动版本。二�
 - 正常启动不调用 PowerShell、`run.bat` 或 `运行程序.bat`，不会出现外部命令窗口。
 - `PaperMiner.exe` 持有单实例锁；双击或连续点击不会创建第二个 GUI。
 - 启动器在后台监护 GUI，并通过 Windows 作业对象保证 GUI 结束后回收仍存活的 MinerU 后代进程。
+- v1.4.17 在 `%LOCALAPPDATA%\PaperMiner\recovery\runs.db` 保存 SQLite WAL 批次队列，并在每篇提取目录原子写入 `.paperminer-complete.json`。
+- GUI 异常退出后，启动器在 2 秒后自动重启并续跑未完成文献；已完成的不重跑，当时正在处理的 PDF 从头重跑。
+- 中断输出移到 `<输出目录>\Recovery\Interrupted` 保留，不删除；10 分钟内闪退 3 次后停止自动重启。
+- 正常关闭或“停止”会把未完成批次保存为暂停；下次启动由用户确认是否继续。
 - v1.4.3 会在无控制台启动时补建 UTF-8 标准输出流，兼容 MinerU 的 `doclayout_yolo` 日志初始化。
 - “代码与数据可用性”会识别文末代码仓库、数据集声明、可见 URL 和 PDF 隐藏超链接；`doi.org` 与出版商 DOI 端点不收录。
 - 已配置 LLM 时，只发送候选 URL 和局部上下文进行 `code / data / both / ignore` 分类，模型不能补写地址；未配置或调用失败时使用本地规则。

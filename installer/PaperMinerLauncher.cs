@@ -11,8 +11,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyDescription("PaperMiner direct GUI launcher without PowerShell")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.16.0")]
-[assembly: AssemblyFileVersion("1.4.16.0")]
+[assembly: AssemblyVersion("1.4.17.0")]
+[assembly: AssemblyFileVersion("1.4.17.0")]
 
 internal static class PaperMinerLauncher
 {
@@ -20,6 +20,9 @@ internal static class PaperMinerLauncher
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const int JobObjectExtendedLimitInformation = 9;
     private const string InstanceMutexName = @"Local\PaperMiner_SingleInstance";
+    private const int MaxCrashesInWindow = 3;
+    private const int RestartDelayMilliseconds = 2000;
+    private static readonly TimeSpan CrashWindow = TimeSpan.FromMinutes(10);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
@@ -50,6 +53,17 @@ internal static class PaperMinerLauncher
             string.Equals(args[0], "--check", StringComparison.OrdinalIgnoreCase))
         {
             return File.Exists(guiScript) ? 0 : 2;
+        }
+
+        if (args.Length > 0 &&
+            string.Equals(args[0], "--check-restart-policy", StringComparison.OrdinalIgnoreCase))
+        {
+            List<DateTime> testCrashes = new List<DateTime>();
+            DateTime testNow = DateTime.UtcNow;
+            bool first = RegisterCrashAndShouldRestart(testCrashes, testNow);
+            bool second = RegisterCrashAndShouldRestart(testCrashes, testNow.AddSeconds(1));
+            bool third = RegisterCrashAndShouldRestart(testCrashes, testNow.AddSeconds(2));
+            return first && second && !third ? 0 : 2;
         }
 
         if (!File.Exists(guiScript))
@@ -85,38 +99,39 @@ internal static class PaperMinerLauncher
                     python = runtime.PythonExe;
                 }
 
-                ProcessStartInfo startInfo = new ProcessStartInfo();
-                startInfo.FileName = python;
-                startInfo.Arguments =
-                    "-s -X utf8 " + QuoteArgument(guiScript) + " --paperminer-launcher";
-                startInfo.WorkingDirectory = baseDirectory;
-                startInfo.UseShellExecute = false;
-                startInfo.CreateNoWindow = true;
-                startInfo.WindowStyle = ProcessWindowStyle.Hidden;
-
-                using (KillOnCloseJob job = new KillOnCloseJob())
-                using (Process process = Process.Start(startInfo))
+                List<DateTime> crashTimes = new List<DateTime>();
+                bool recoverAfterCrash = false;
+                while (true)
                 {
-                    if (process == null)
+                    GuiRunResult result = RunGuiOnce(
+                        python,
+                        guiScript,
+                        baseDirectory,
+                        recoverAfterCrash);
+                    if (result.ExitCode == 0)
                     {
-                        throw new InvalidOperationException("The Python GUI process did not start.");
+                        return 0;
                     }
 
-                    job.TryAssign(process);
-                    if (process.WaitForExit(1500))
+                    DateTime crashTime = DateTime.UtcNow;
+                    LogLauncher(
+                        "PaperMiner GUI exited unexpectedly. ExitCode=" +
+                        result.ExitCode.ToString() + ", RuntimeSeconds=" +
+                        result.Runtime.TotalSeconds.ToString("F1") + ".");
+                    if (!RegisterCrashAndShouldRestart(crashTimes, crashTime))
                     {
-                        if (process.ExitCode != 0)
-                        {
-                            ShowError(
-                                "PaperMiner exited before the GUI opened.\n\n" +
-                                "Review the logs folder or run Setup.exe to repair the runtime.");
-                        }
-                        return process.ExitCode;
+                        ShowError(
+                            "PaperMiner stopped after three unexpected exits within ten minutes.\n\n" +
+                            "The unfinished batch remains saved and will be offered again on the next launch. " +
+                            "Review PaperMiner-launcher-error.log and the latest PaperMiner log before retrying.");
+                        return result.ExitCode;
                     }
 
-                    // 保持单实例锁和作业对象，直到 GUI 完全退出。
-                    process.WaitForExit();
-                    return process.ExitCode;
+                    // Closing this run's job has already removed every orphaned
+                    // MinerU child.  The restarted GUI reconnects to the durable
+                    // SQLite queue and re-runs only the interrupted PDF boundary.
+                    Thread.Sleep(RestartDelayMilliseconds);
+                    recoverAfterCrash = true;
                 }
             }
             catch (Exception exception)
@@ -135,6 +150,93 @@ internal static class PaperMinerLauncher
                 }
             }
         }
+    }
+
+    private static GuiRunResult RunGuiOnce(
+        string python,
+        string guiScript,
+        string baseDirectory,
+        bool recoverAfterCrash)
+    {
+        ProcessStartInfo startInfo = new ProcessStartInfo();
+        startInfo.FileName = python;
+        startInfo.Arguments =
+            "-s -X utf8 " + QuoteArgument(guiScript) + " --paperminer-launcher" +
+            (recoverAfterCrash ? " --recover-after-crash" : "");
+        startInfo.WorkingDirectory = baseDirectory;
+        startInfo.UseShellExecute = false;
+        startInfo.CreateNoWindow = true;
+        startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        int exitCode;
+        using (KillOnCloseJob job = new KillOnCloseJob())
+        {
+            Process process = Process.Start(startInfo);
+            if (process == null)
+            {
+                throw new InvalidOperationException("The Python GUI process did not start.");
+            }
+            using (process)
+            {
+                job.TryAssign(process);
+                process.WaitForExit();
+                exitCode = process.ExitCode;
+            }
+        }
+        stopwatch.Stop();
+        GuiRunResult result = new GuiRunResult();
+        result.ExitCode = exitCode;
+        result.Runtime = stopwatch.Elapsed;
+        return result;
+    }
+
+    private static bool RegisterCrashAndShouldRestart(
+        List<DateTime> crashTimes,
+        DateTime crashTime)
+    {
+        crashTimes.RemoveAll(delegate(DateTime value)
+        {
+            return crashTime - value > CrashWindow;
+        });
+        crashTimes.Add(crashTime);
+        return crashTimes.Count < MaxCrashesInWindow;
+    }
+
+    private static void LogLauncher(string message)
+    {
+        try
+        {
+            string localData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            string logDirectory = Path.Combine(localData, "PaperMiner", "logs");
+            Directory.CreateDirectory(logDirectory);
+            File.AppendAllText(
+                Path.Combine(logDirectory, "PaperMiner-launcher-error.log"),
+                DateTime.Now.ToString("o") + " " + message + Environment.NewLine,
+                System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+            try
+            {
+                string fallback = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+                Directory.CreateDirectory(fallback);
+                File.AppendAllText(
+                    Path.Combine(fallback, "PaperMiner-launcher-error.log"),
+                    DateTime.Now.ToString("o") + " " + message + Environment.NewLine,
+                    System.Text.Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private sealed class GuiRunResult
+    {
+        public int ExitCode { get; set; }
+        public TimeSpan Runtime { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -350,18 +452,7 @@ internal static class PaperMinerLauncher
 
     private static void ShowError(string message)
     {
-        try
-        {
-            string logDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
-            Directory.CreateDirectory(logDirectory);
-            File.AppendAllText(
-                Path.Combine(logDirectory, "PaperMiner-launcher-error.log"),
-                DateTime.Now.ToString("o") + " " + message + Environment.NewLine,
-                System.Text.Encoding.UTF8);
-        }
-        catch
-        {
-        }
+        LogLauncher(message);
         MessageBoxW(IntPtr.Zero, message, "PaperMiner", MbIconError);
     }
 
