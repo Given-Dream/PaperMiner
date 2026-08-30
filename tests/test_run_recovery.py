@@ -34,6 +34,30 @@ OPTIONS = {
 
 
 class RunRecoveryStoreTests(unittest.TestCase):
+    def test_cleanup_pending_run_is_offered_again(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "complete.pdf"
+            source.write_bytes(b"complete")
+            store = RunRecoveryStore(root / "runs.db")
+            run_id = store.create_run(
+                mode="full",
+                input_directory=root,
+                output_directory=root / "output",
+                options=OPTIONS,
+                items=[source],
+            )
+            store.transition_document(run_id, source, "complete")
+            store.set_run_status(
+                run_id,
+                "cleanup_pending",
+                "locked partial output",
+            )
+
+            self.assertEqual(store.summary(run_id)["unfinished"], 0)
+            self.assertEqual(store.latest_resumable_run()["run_id"], run_id)
+            store.close()
+
     def test_wal_state_survives_process_hard_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

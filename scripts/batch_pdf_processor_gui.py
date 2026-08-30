@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.17"
+    __version__ = "1.4.18"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -503,6 +503,7 @@ class BatchPDFProcessorGUI:
         self._run_started_from_recovery = False
         self._batch_had_unhandled_error = False
         self._checkpoint_failure = False
+        self._last_recovery_cleanup = {"removed": 0, "failed": []}
         self._resume_prompt_shown = False
         self._pending_resume_run_id = None
         self._resume_in_progress = False
@@ -1583,9 +1584,24 @@ class BatchPDFProcessorGUI:
                     if self._checkpoint_failure
                     else "The batch ended before all registered documents reached a terminal state."
                 )
-            store.set_run_status(run_id, status, error)
             if status == "completed":
+                self._last_recovery_cleanup = self._cleanup_interrupted_recovery(
+                    run_id,
+                    output_root=self.output_path,
+                )
+                cleanup_failed = bool(self._last_recovery_cleanup.get("failed"))
+                store.set_run_status(
+                    run_id,
+                    "cleanup_pending" if cleanup_failed else "completed",
+                    (
+                        "Interrupted partial-output cleanup will be retried on next launch."
+                        if cleanup_failed
+                        else ""
+                    ),
+                )
                 self.active_run_id = None
+            else:
+                store.set_run_status(run_id, status, error)
             return status, summary
         except Exception as exc:
             self.log(f"[ERROR] 无法完成批次恢复状态: {exc}")
@@ -1610,7 +1626,20 @@ class BatchPDFProcessorGUI:
         summary = store.summary(run["run_id"])
         unfinished = int(summary.get("unfinished", 0))
         if unfinished <= 0:
-            store.set_run_status(run["run_id"], "completed")
+            self._last_recovery_cleanup = self._cleanup_interrupted_recovery(
+                run["run_id"],
+                output_root=Path(run["output_directory"]),
+            )
+            cleanup_failed = bool(self._last_recovery_cleanup.get("failed"))
+            store.set_run_status(
+                run["run_id"],
+                "cleanup_pending" if cleanup_failed else "completed",
+                (
+                    "Interrupted partial-output cleanup will be retried on next launch."
+                    if cleanup_failed
+                    else ""
+                ),
+            )
             return
 
         automatic = (
@@ -1761,6 +1790,101 @@ class BatchPDFProcessorGUI:
                 self.log(f"[WARN] 无法隔离中断输出，已取消本篇自动重试: {exc}")
         return safe_to_retry
 
+    @staticmethod
+    def _is_reparse_or_mount(path: Path) -> bool:
+        try:
+            if path.is_symlink() or os.path.ismount(str(path)):
+                return True
+            is_junction = getattr(os.path, "isjunction", None)
+            return bool(is_junction and is_junction(str(path)))
+        except OSError:
+            return True
+
+    def _cleanup_interrupted_recovery(
+        self,
+        run_id: str,
+        *,
+        output_root: 'Path | None' = None,
+    ) -> dict:
+        """Delete only this completed run's quarantined partial outputs."""
+        result = {"removed": 0, "failed": []}
+        run_id = str(run_id or "")
+        if not re.fullmatch(r"\d{8}_\d{6}_[0-9a-f]{10}", run_id):
+            result["failed"].append("invalid_run_id")
+            self.log(f"[WARN] 拒绝清理非标准批次标识: {run_id}")
+            return result
+
+        output_root = Path(output_root or self.output_path)
+        recovery_parent = output_root / "Recovery"
+        recovery_root = recovery_parent / "Interrupted"
+        if not recovery_root.exists():
+            return result
+        if (
+            self._is_reparse_or_mount(recovery_root)
+            or not self._path_is_within(recovery_root, output_root)
+        ):
+            result["failed"].append(str(recovery_root))
+            self.log(f"[WARN] 拒绝清理边界外或重解析的恢复目录: {recovery_root}")
+            return result
+
+        expected_prefix = f"{run_id}_"
+        try:
+            candidates = list(recovery_root.iterdir())
+        except OSError as exc:
+            result["failed"].append(str(recovery_root))
+            self.log(f"[WARN] 无法枚举中断半成品: {exc}")
+            return result
+
+        for candidate in candidates:
+            if not candidate.name.startswith(expected_prefix):
+                continue
+            if (
+                not candidate.is_dir()
+                or self._is_reparse_or_mount(candidate)
+                or not self._path_is_within(candidate, recovery_root)
+            ):
+                result["failed"].append(str(candidate))
+                self.log(f"[WARN] 拒绝清理非普通批次目录: {candidate}")
+                continue
+
+            unsafe_child = None
+            try:
+                for current_root, directories, _files in os.walk(
+                    candidate,
+                    topdown=True,
+                    followlinks=False,
+                ):
+                    for directory_name in directories:
+                        child = Path(current_root) / directory_name
+                        if self._is_reparse_or_mount(child):
+                            unsafe_child = child
+                            break
+                    if unsafe_child is not None:
+                        break
+            except OSError as exc:
+                result["failed"].append(str(candidate))
+                self.log(f"[WARN] 无法校验半成品目录，已保留: {candidate}: {exc}")
+                continue
+            if unsafe_child is not None:
+                result["failed"].append(str(candidate))
+                self.log(f"[WARN] 半成品含重解析点，已保留: {unsafe_child}")
+                continue
+
+            try:
+                shutil.rmtree(candidate)
+                result["removed"] += 1
+                self.log(f"批次已结束，已删除中断半成品: {candidate}")
+            except OSError as exc:
+                result["failed"].append(str(candidate))
+                self.log(f"[WARN] 无法删除中断半成品: {candidate}: {exc}")
+
+        for empty_directory in (recovery_root, recovery_parent):
+            try:
+                empty_directory.rmdir()
+            except OSError:
+                pass
+        return result
+
     def _resume_persisted_run(self, run_id: str):
         if self.is_processing or self._resume_in_progress:
             return
@@ -1846,12 +1970,37 @@ class BatchPDFProcessorGUI:
                 resume_items.append(source)
 
             if not resume_items:
-                store.set_run_status(run_id, "completed")
+                self._last_recovery_cleanup = self._cleanup_interrupted_recovery(
+                    run_id,
+                    output_root=self.output_path,
+                )
+                cleanup_failed = bool(self._last_recovery_cleanup.get("failed"))
+                store.set_run_status(
+                    run_id,
+                    "cleanup_pending" if cleanup_failed else "completed",
+                    (
+                        "Interrupted partial-output cleanup will be retried on next launch."
+                        if cleanup_failed
+                        else ""
+                    ),
+                )
                 self.active_run_id = None
                 self.log(f"批次 {run_id} 已无待处理文献。")
+                cleanup = self._last_recovery_cleanup
+                cleanup_note = (
+                    f"\n已删除 {cleanup.get('removed', 0)} 个中断半成品目录。"
+                    if cleanup.get("removed", 0)
+                    else ""
+                )
+                if cleanup.get("failed"):
+                    cleanup_note += (
+                        f"\n有 {len(cleanup['failed'])} 个半成品目录未能清理，"
+                        "将在下次启动重试。"
+                    )
                 messagebox.showinfo(
                     "恢复完成",
-                    "未完成批次已核查完毕，没有需要重新处理的文献。",
+                    "未完成批次已核查完毕，没有需要重新处理的文献。"
+                    + cleanup_note,
                     parent=self.root,
                 )
                 return
@@ -1864,6 +2013,7 @@ class BatchPDFProcessorGUI:
             self._run_started_from_recovery = True
             self._batch_had_unhandled_error = False
             self._checkpoint_failure = False
+            self._last_recovery_cleanup = {"removed": 0, "failed": []}
             self.is_processing = True
             self.start_button.config(state="disabled")
             self.stop_button.config(state="normal")
@@ -3337,7 +3487,7 @@ class BatchPDFProcessorGUI:
         self.log_text.config(state='disabled')
 
     def is_already_processed(self, pdf_name: str) -> bool:
-        """Only trust v1.4.17 output after its atomic completion marker."""
+        """Only trust v1.4.17+ output after its atomic completion marker."""
         extract_dir = self.extract_output_path / pdf_name
         if not extract_dir.exists():
             return False
@@ -3635,6 +3785,7 @@ class BatchPDFProcessorGUI:
         self._run_started_from_recovery = False
         self._batch_had_unhandled_error = False
         self._checkpoint_failure = False
+        self._last_recovery_cleanup = {"removed": 0, "failed": []}
         self.is_processing = True
         self.start_button.config(state='disabled')
         self.stop_button.config(state='normal')
@@ -4911,6 +5062,19 @@ class BatchPDFProcessorGUI:
         if self.skipped_count > 0:
             summary_parts.append(f"跳过: {self.skipped_count} 个")
         summary_parts.append(f"总计: {self.total_pdfs} 个")
+        cleanup = getattr(
+            self,
+            "_last_recovery_cleanup",
+            {"removed": 0, "failed": []},
+        )
+        if run_status == "completed" and cleanup.get("removed", 0):
+            summary_parts.append(
+                f"已删除中断半成品: {cleanup['removed']} 个目录"
+            )
+        if run_status == "completed" and cleanup.get("failed"):
+            summary_parts.append(
+                f"未能清理的半成品: {len(cleanup['failed'])} 个（请查看日志）"
+            )
         remaining = int(recovery_summary.get("unfinished", 0))
 
         if run_status in ("paused", "interrupted"):

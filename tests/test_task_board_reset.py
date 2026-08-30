@@ -160,8 +160,9 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(transitions, ["parsing"])
         self.assertEqual(worker.failed_count, 0)
 
-    def test_interrupted_outputs_are_moved_to_recovery_not_deleted(self):
+    def test_interrupted_outputs_are_kept_until_completion_then_deleted(self):
         with tempfile.TemporaryDirectory() as temporary:
+            run_id = "20260830_220000_0123456789"
             output = Path(temporary) / "output"
             raw_root = output / "raw"
             extract_root = output / "extract"
@@ -178,11 +179,12 @@ class RecoveryWorkflowTests(unittest.TestCase):
                 extract_output_path=extract_root,
                 log=messages.append,
                 _path_is_within=BatchPDFProcessorGUI._path_is_within,
+                _is_reparse_or_mount=BatchPDFProcessorGUI._is_reparse_or_mount,
             )
 
             safe_to_retry = BatchPDFProcessorGUI._quarantine_interrupted_document(
                 worker,
-                "run-test",
+                run_id,
                 Path(temporary) / "paper.pdf",
                 "paper",
                 raw_directory=raw / "auto",
@@ -200,6 +202,135 @@ class RecoveryWorkflowTests(unittest.TestCase):
                 [path.read_text(encoding="utf-8") for path in recovery.rglob("result.md")],
                 ["partial"],
             )
+
+            unrelated = recovery / "20260830_220001_aaaaaaaaaa_20260830_220002"
+            unrelated.mkdir()
+            (unrelated / "keep.txt").write_text("other run", encoding="utf-8")
+            cleanup = BatchPDFProcessorGUI._cleanup_interrupted_recovery(
+                worker,
+                run_id,
+                output_root=output,
+            )
+
+            self.assertEqual(cleanup, {"removed": 1, "failed": []})
+            self.assertEqual(list(recovery.rglob("raw.txt")), [])
+            self.assertEqual(list(recovery.rglob("result.md")), [])
+            self.assertEqual(
+                (unrelated / "keep.txt").read_text(encoding="utf-8"),
+                "other run",
+            )
+            refused = BatchPDFProcessorGUI._cleanup_interrupted_recovery(
+                worker,
+                "..",
+                output_root=output,
+            )
+            self.assertEqual(refused["removed"], 0)
+            self.assertEqual(refused["failed"], ["invalid_run_id"])
+            self.assertTrue((unrelated / "keep.txt").exists())
+
+    def test_cleanup_runs_only_after_batch_reaches_terminal_state(self):
+        class FakeStore:
+            def __init__(self, unfinished):
+                self.unfinished = unfinished
+                self.statuses = []
+
+            def summary(self, _run_id):
+                return {"total": 2, "unfinished": self.unfinished}
+
+            def set_run_status(self, _run_id, status, error):
+                self.statuses.append((status, error))
+
+        completed_calls = []
+        completed_store = FakeStore(0)
+        completed_worker = SimpleNamespace(
+            run_recovery_store=completed_store,
+            active_run_id="20260830_220000_0123456789",
+            output_path=Path("D:/results"),
+            _batch_had_unhandled_error=False,
+            _checkpoint_failure=False,
+            log=lambda _message: None,
+            _cleanup_interrupted_recovery=lambda run_id, **kwargs: (
+                completed_calls.append((run_id, kwargs["output_root"]))
+                or {"removed": 1, "failed": []}
+            ),
+        )
+
+        status, _summary = BatchPDFProcessorGUI._finish_active_run_state(
+            completed_worker,
+            run_stopped=False,
+        )
+
+        self.assertEqual(status, "completed")
+        self.assertEqual(len(completed_calls), 1)
+        self.assertEqual(completed_store.statuses, [("completed", "")])
+        self.assertIsNone(completed_worker.active_run_id)
+
+        retry_store = FakeStore(0)
+        retry_worker = SimpleNamespace(
+            run_recovery_store=retry_store,
+            active_run_id="20260830_220000_0123456789",
+            output_path=Path("D:/results"),
+            _batch_had_unhandled_error=False,
+            _checkpoint_failure=False,
+            log=lambda _message: None,
+            _cleanup_interrupted_recovery=lambda *_args, **_kwargs: {
+                "removed": 0,
+                "failed": ["locked"],
+            },
+        )
+
+        status, _summary = BatchPDFProcessorGUI._finish_active_run_state(
+            retry_worker,
+            run_stopped=False,
+        )
+
+        self.assertEqual(status, "completed")
+        self.assertEqual(retry_store.statuses[0][0], "cleanup_pending")
+        self.assertIn("retried", retry_store.statuses[0][1])
+
+        paused_calls = []
+        paused_store = FakeStore(1)
+        paused_worker = SimpleNamespace(
+            run_recovery_store=paused_store,
+            active_run_id="20260830_220000_0123456789",
+            output_path=Path("D:/results"),
+            _batch_had_unhandled_error=False,
+            _checkpoint_failure=False,
+            log=lambda _message: None,
+            _cleanup_interrupted_recovery=lambda *_args, **_kwargs: paused_calls.append(True),
+        )
+
+        status, _summary = BatchPDFProcessorGUI._finish_active_run_state(
+            paused_worker,
+            run_stopped=True,
+        )
+
+        self.assertEqual(status, "paused")
+        self.assertEqual(paused_calls, [])
+        self.assertEqual(
+            paused_worker.active_run_id,
+            "20260830_220000_0123456789",
+        )
+
+        interrupted_calls = []
+        interrupted_store = FakeStore(1)
+        interrupted_worker = SimpleNamespace(
+            run_recovery_store=interrupted_store,
+            active_run_id="20260830_220000_0123456789",
+            output_path=Path("D:/results"),
+            _batch_had_unhandled_error=True,
+            _checkpoint_failure=False,
+            log=lambda _message: None,
+            _cleanup_interrupted_recovery=lambda *_args, **_kwargs: interrupted_calls.append(True),
+        )
+
+        status, _summary = BatchPDFProcessorGUI._finish_active_run_state(
+            interrupted_worker,
+            run_stopped=False,
+        )
+
+        self.assertEqual(status, "interrupted")
+        self.assertEqual(interrupted_calls, [])
 
 
 if __name__ == "__main__":

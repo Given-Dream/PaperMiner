@@ -9,8 +9,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("PaperMiner reinstall and safe uninstall")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.17.0")]
-[assembly: AssemblyFileVersion("1.4.17.0")]
+[assembly: AssemblyVersion("1.4.18.0")]
+[assembly: AssemblyFileVersion("1.4.18.0")]
 
 internal static class PaperMinerUninstall
 {

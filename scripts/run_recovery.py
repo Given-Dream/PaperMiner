@@ -23,7 +23,7 @@ from typing import Iterable
 
 
 MARKER_NAME = ".paperminer-complete.json"
-RESUMABLE_RUN_STATES = ("running", "interrupted", "paused")
+RESUMABLE_RUN_STATES = ("running", "interrupted", "paused", "cleanup_pending")
 TERMINAL_DOCUMENT_STATES = ("complete", "failed", "skipped")
 INFLIGHT_DOCUMENT_STATES = ("parsing", "raw_validated", "extracting")
 

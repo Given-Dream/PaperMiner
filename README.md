@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.17** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.17/PaperMiner-v1.4.17-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.17)
+当前版本：**v1.4.18** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.18/PaperMiner-v1.4.18-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -27,12 +27,19 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
 
+## v1.4.18 半成品生命周期
+
+- 批次暂停或闪退后，中断半成品保留在 `Recovery\Interrupted`，用于恢复前隔离和人工核查。
+- 当该批次所有 PDF 都已完成、失败或跳过后，软件自动删除该批次的暂存半成品。
+- 清理仅匹配当前批次 ID 前缀，且必须位于当前输出根的 `Recovery\Interrupted` 内；`raw`、`extract` 正式结果及其他批次不受影响。
+- 发现重解析点、越界路径或删除异常时，软件保留对应目录、写入日志，并在下次启动重试安全清理。
+
 ## v1.4.17 闪退恢复与工作连续性
 
 - 开始批处理前先把全部 PDF 写入 SQLite WAL 持久化队列，每篇在解析、raw 校验、提取和完成边界提交恢复点。
 - 完成结果使用原子标记核验；已完成 PDF 不重跑，闪退时正在处理的 PDF 从头安全重跑。
 - GUI 异常退出后，`PaperMiner.exe` 回收遗留 MinerU，2 秒后自动重启并继续批次；10 分钟 3 次闪退则停止重启，避免循环崩溃。
-- 中断产物移到输出根目录的 `Recovery\Interrupted`，只隔离不删除。点击“停止”或正常关闭会保存为暂停，下次启动询问是否继续。
+- 中断产物在批次未完成期间移到输出根目录的 `Recovery\Interrupted` 隔离。点击“停止”或正常关闭会保存为暂停，下次启动询问是否继续。
 - 恢复精度是“按 PDF”，不承诺从同一 PDF 的某一页或模型中间层继续。
 
 ## v1.4.16 连续运行与 GPU 智能推荐
@@ -176,8 +183,8 @@ Setup 中分别指定：
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.17 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.17)。
-2. 下载 `PaperMiner-v1.4.17-Setup.exe`，并使用同页的 `SHA256SUMS.txt` 校验完整性。
+1. 打开 [v1.4.18 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)。
+2. 下载 `PaperMiner-v1.4.18-Setup.exe`，并使用同页的 `SHA256SUMS.txt` 校验完整性。
 3. 双击安装包。Setup 先快速检查明确路径和已保存配置；未找到时，可直接勾选“我确认本机没有 Conda”，也可先使用“检测此目录”或“全盘检索 Conda”进行额外核查。PaperMiner 默认目录为：
 
    ```text

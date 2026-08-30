@@ -1,5 +1,14 @@
 # PaperMiner 更新日志
 
+## v1.4.18 (2026-08-30)
+
+- 调整中断半成品生命周期：批次暂停或异常中断时继续保留 `Recovery\Interrupted`，以便重启恢复和人工核查。
+- 当本批次全部文献进入完成、失败或跳过终态后，自动删除仅属于该批次的中断半成品目录。
+- 清理前校验批次 ID、输出根边界、目录前缀与重解析点；不删除当前 `raw` / `extract` 正式结果，不触及其他批次的恢复目录。
+- 清理失败时保留对应目录并写入日志，批次记为 `cleanup_pending` 并在下次启动重试，不会扩大删除范围。
+
+---
+
 ## v1.4.17 (2026-08-30)
 
 - 新增 SQLite WAL 持久化批次日志，每篇 PDF 在 `pending / parsing / raw_validated / extracting / complete` 阶段更新恢复点；状态保存在 `%LOCALAPPDATA%\PaperMiner\recovery\runs.db`。

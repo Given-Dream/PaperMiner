@@ -134,7 +134,7 @@ function Measure-PaperMinerAnacondaSource {
     try {
         $client = New-Object System.Net.Http.HttpClient
         $client.Timeout = [TimeSpan]::FromSeconds(10)
-        $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.17')
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.18')
         $request = New-Object System.Net.Http.HttpRequestMessage(
             [System.Net.Http.HttpMethod]::Get,
             [string]$Source.Uri)
@@ -261,7 +261,7 @@ function Invoke-PaperMinerMirrorDownload {
 
             $client = New-Object System.Net.Http.HttpClient
             $client.Timeout = [TimeSpan]::FromHours(4)
-            $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.17')
+            $client.DefaultRequestHeaders.UserAgent.ParseAdd('PaperMiner/1.4.18')
             $response = $client.GetAsync(
                 [string]$uri,
                 [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead

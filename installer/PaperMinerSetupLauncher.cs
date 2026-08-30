@@ -8,8 +8,8 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyDescription("PaperMiner dependency setup and repair")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.17.0")]
-[assembly: AssemblyFileVersion("1.4.17.0")]
+[assembly: AssemblyVersion("1.4.18.0")]
+[assembly: AssemblyFileVersion("1.4.18.0")]
 
 internal static class PaperMinerSetupLauncher
 {
