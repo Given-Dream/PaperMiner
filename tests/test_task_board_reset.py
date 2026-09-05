@@ -82,6 +82,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
             name: FakeVariable()
             for name in (
                 "extract_text_var",
+                "extract_title_var",
                 "extract_formula_var",
                 "extract_figures_var",
                 "extract_tables_var",
@@ -126,6 +127,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
 
         self.assertFalse(worker.use_gpu_var.value)
         self.assertFalse(worker.extract_references_var.value)
+        self.assertFalse(worker.extract_title_var.value)
 
     def test_stop_during_sequential_mineru_keeps_document_nonterminal(self):
         source = Path("paper.pdf")

@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.22"
+    __version__ = "1.4.23"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -107,6 +107,14 @@ try:
         write_reference_report,
         write_reference_scan_marker,
     )
+    from title_extractor import (
+        TITLE_REPORT_FILENAME,
+        TITLE_SCAN_FILENAME,
+        extract_article_title,
+        title_scan_completed,
+        write_title_report,
+        write_title_scan_marker,
+    )
 except ImportError:
     from scripts.section_merger import (
         merge_all_sections_charts_code_and_references_to_markdown
@@ -127,6 +135,14 @@ except ImportError:
         reference_scan_completed,
         write_reference_report,
         write_reference_scan_marker,
+    )
+    from scripts.title_extractor import (
+        TITLE_REPORT_FILENAME,
+        TITLE_SCAN_FILENAME,
+        extract_article_title,
+        title_scan_completed,
+        write_title_report,
+        write_title_scan_marker,
     )
 
 try:
@@ -1536,6 +1552,7 @@ class BatchPDFProcessorGUI:
             else []
         )
         self._active_run_options = {
+            "extract_title": bool(self.extract_title_var.get()),
             "extract_text": bool(self.extract_text_var.get()),
             "extract_formula": bool(self.extract_formula_var.get()),
             "extract_figures": bool(self.extract_figures_var.get()),
@@ -1756,6 +1773,7 @@ class BatchPDFProcessorGUI:
         # restored after it rather than overwritten by it.
         self.on_mode_change()
         option_variables = {
+            "extract_title": self.extract_title_var,
             "extract_text": self.extract_text_var,
             "extract_formula": self.extract_formula_var,
             "extract_figures": self.extract_figures_var,
@@ -1770,6 +1788,9 @@ class BatchPDFProcessorGUI:
         # Keep their recovery semantics stable instead of silently adding work.
         if "extract_references" not in options:
             self.extract_references_var.set(False)
+        # Runs created before v1.4.23 never requested title extraction.
+        if "extract_title" not in options:
+            self.extract_title_var.set(False)
         for key, variable in option_variables.items():
             if key in options:
                 variable.set(bool(options[key]))
@@ -2547,6 +2568,7 @@ class BatchPDFProcessorGUI:
             row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 8)
         )
 
+        self.extract_title_var = tk.BooleanVar(value=True)
         self.extract_text_var = tk.BooleanVar(value=True)
         self.extract_formula_var = tk.BooleanVar(value=True)
         self.extract_figures_var = tk.BooleanVar(value=True)
@@ -2561,10 +2583,11 @@ class BatchPDFProcessorGUI:
             row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 4)
         )
         option_specs = (
-            ('文字 / Markdown', self.extract_text_var, 5, 0),
-            ('公式 / LaTeX', self.extract_formula_var, 5, 1),
-            ('图片与编号', self.extract_figures_var, 6, 0),
-            ('表格 / Excel', self.extract_tables_var, 6, 1),
+            ('文章标题 / Markdown', self.extract_title_var, 5, 0),
+            ('文字 / Markdown', self.extract_text_var, 5, 1),
+            ('公式 / LaTeX', self.extract_formula_var, 6, 0),
+            ('图片与编号', self.extract_figures_var, 6, 1),
+            ('表格 / Excel', self.extract_tables_var, 7, 0),
         )
         for text, variable, row, column in option_specs:
             self.create_styled_checkbutton(options_frame, text, variable).grid(
@@ -2575,14 +2598,14 @@ class BatchPDFProcessorGUI:
             '论文章节（正则 + LLM）',
             self.extract_sections_var,
             bootstyle='info',
-        ).grid(row=7, column=0, sticky=tk.W, pady=2)
+        ).grid(row=7, column=1, sticky=tk.W, pady=2)
         self.extract_open_source_check = self.create_styled_checkbutton(
             options_frame,
             '代码与数据可用性（文末链接）',
             self.extract_open_source_var,
             bootstyle='success',
         )
-        self.extract_open_source_check.grid(row=7, column=1, sticky=tk.W, pady=2)
+        self.extract_open_source_check.grid(row=8, column=0, sticky=tk.W, pady=2)
 
         self.extract_references_check = self.create_styled_checkbutton(
             options_frame,
@@ -2591,7 +2614,7 @@ class BatchPDFProcessorGUI:
             bootstyle='warning',
         )
         self.extract_references_check.grid(
-            row=8, column=0, columnspan=2, sticky=tk.W, pady=2
+            row=8, column=1, sticky=tk.W, pady=2
         )
 
         ttk.Separator(options_frame, orient='horizontal', bootstyle='secondary').grid(
@@ -2844,7 +2867,7 @@ class BatchPDFProcessorGUI:
         ).grid(row=1, column=2, sticky=(tk.W, tk.E), padx=(3, 0))
         self.merge_markdown_button = ttk.Button(
             output_frame,
-            text='合并同名章节、图表、代码/数据地址和参考文献',
+            text='合并文章标题、同名章节、图表、代码/数据地址和参考文献',
             command=self.merge_all_sections_and_charts_to_markdown,
             bootstyle='info',
         )
@@ -3044,6 +3067,7 @@ class BatchPDFProcessorGUI:
             row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10
         )
 
+        self.extract_title_var = tk.BooleanVar(value=True)
         self.extract_text_var = tk.BooleanVar(value=True)
         self.extract_formula_var = tk.BooleanVar(value=True)
         self.extract_figures_var = tk.BooleanVar(value=True)
@@ -3098,6 +3122,12 @@ class BatchPDFProcessorGUI:
             self.extract_references_var,
         )
         self.extract_references_check.grid(row=7, column=0, sticky=tk.W, pady=4)
+
+        self.create_styled_checkbutton(
+            options_frame,
+            "提取文章标题（Markdown）",
+            self.extract_title_var,
+        ).grid(row=7, column=1, sticky=tk.W, pady=4)
 
         # 当前 LLM 接口及模型。自定义接口在设置中普通单击选择一个模型。
         llm_frame = ttk.Frame(options_frame)
@@ -3337,7 +3367,7 @@ class BatchPDFProcessorGUI:
 
         self.merge_markdown_button = ttk.Button(
             output_frame,
-            text="合并同名章节、图表、代码/数据地址和参考文献",
+            text="合并文章标题、同名章节、图表、代码/数据地址和参考文献",
             command=self.merge_all_sections_and_charts_to_markdown,
         )
         self.merge_markdown_button.grid(
@@ -3399,7 +3429,7 @@ class BatchPDFProcessorGUI:
             self.log(f"⚠️  无法保存当前 LLM 模型: {exc}")
 
     def merge_all_sections_and_charts_to_markdown(self):
-        """合并章节、图表、代码/数据可用性和逐篇参考文献报告。"""
+        """合并标题、章节、图表、代码/数据可用性和参考文献。"""
         target = self.extract_output_path / "MergedSections"
         try:
             (
@@ -3411,6 +3441,8 @@ class BatchPDFProcessorGUI:
                 code_link_count,
                 reference_source_count,
                 reference_entry_count,
+                title_source_count,
+                title_review_count,
             ) = merge_sections_charts_code_and_reference_files(
                 self.extract_output_path,
                 target,
@@ -3433,6 +3465,9 @@ class BatchPDFProcessorGUI:
         self.log(
             f"  - 参考文献：汇总 {reference_source_count} 篇论文，累计 {reference_entry_count} 条"
         )
+        self.log(
+            f"  - 文章标题：汇总 {title_source_count} 篇，需人工核查 {title_review_count} 篇"
+        )
         for output in outputs:
             self.log(f"  - {output}")
         messagebox.showinfo(
@@ -3442,6 +3477,7 @@ class BatchPDFProcessorGUI:
                 f"同名章节：{section_count} 类；图表来源：{chart_count} 个；\n"
                 f"代码/数据报告：{code_source_count} 篇，地址：{code_link_count} 个。\n"
                 f"参考文献报告：{reference_source_count} 篇，共 {reference_entry_count} 条。\n"
+                f"文章标题：{title_source_count} 篇，需核查 {title_review_count} 篇。\n"
                 f"输出目录：{target}"
             ),
         )
@@ -3694,6 +3730,9 @@ class BatchPDFProcessorGUI:
         if self._run_option("extract_references", False):
             if not reference_scan_completed(extract_dir):
                 return False
+        if self._run_option("extract_title", False):
+            if not title_scan_completed(extract_dir):
+                return False
         try:
             for item in extract_dir.rglob('*'):
                 if item.is_file():
@@ -3772,6 +3811,7 @@ class BatchPDFProcessorGUI:
 
         # 检查是否至少选择了一项提取内容
         if not any([
+            self.extract_title_var.get(),
             self.extract_text_var.get(),
             self.extract_formula_var.get(),
             self.extract_figures_var.get(),
@@ -3802,6 +3842,8 @@ class BatchPDFProcessorGUI:
 
             # 构建提取内容描述
             extract_items = []
+            if self.extract_title_var.get():
+                extract_items.append("文章标题")
             if self.extract_text_var.get():
                 extract_items.append("文字")
             if self.extract_formula_var.get():
@@ -3888,6 +3930,8 @@ class BatchPDFProcessorGUI:
 
             # 构建提取内容描述
             extract_items = []
+            if self.extract_title_var.get():
+                extract_items.append("文章标题")
             if self.extract_text_var.get():
                 extract_items.append("文字")
             if self.extract_formula_var.get():
@@ -5270,6 +5314,16 @@ class BatchPDFProcessorGUI:
 
             any_success = False
 
+            # 标题属于元数据复制任务：结构化首页和 PDF 元数据优先，
+            # Markdown 与源文件名只作交叉核验/保守回退。
+            if self._run_option("extract_title", True):
+                if self.extract_paper_title(
+                    raw_pdf_dir,
+                    extract_pdf_dir,
+                    pdf_name,
+                ):
+                    any_success = True
+
             # 提取文字 (Markdown) - 保存到extract/pdf_name/pdf_name.md
             if self._run_option("extract_text", True):
                 if self.extract_text(raw_pdf_dir, extract_pdf_dir, pdf_name):
@@ -6124,6 +6178,72 @@ class BatchPDFProcessorGUI:
             return True
         except Exception as exc:
             self.log(f"    ❌ 参考文献提取失败: {exc}")
+            self.log(traceback.format_exc())
+            return False
+
+    def extract_paper_title(
+        self,
+        raw_dir: Path,
+        extract_dir: Path,
+        pdf_name: str,
+    ) -> bool:
+        """从独立证据提取文章标题并保存逐篇 Markdown 与审计标记。"""
+        try:
+            self.log("  - 提取文章标题...")
+            md_file = self.find_file_by_glob(raw_dir, f"{pdf_name}.md", "*.md")
+            content_list = self.find_file_by_glob(
+                raw_dir,
+                f"{pdf_name}_content_list.json",
+                "*_content_list.json",
+            )
+            origin_pdf = self.find_file_by_glob(
+                raw_dir,
+                f"{pdf_name}_origin.pdf",
+                "*_origin.pdf",
+            )
+            if origin_pdf is None:
+                input_candidate = Path(getattr(self, "input_path", Path())) / f"{pdf_name}.pdf"
+                if input_candidate.is_file():
+                    origin_pdf = input_candidate
+
+            markdown_content = ""
+            if md_file is not None:
+                markdown_content = md_file.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+            result = extract_article_title(
+                markdown_content,
+                content_list,
+                origin_pdf,
+                source_stem=pdf_name,
+            )
+            target_dir = extract_dir / "Title"
+            target = target_dir / TITLE_REPORT_FILENAME
+            report = write_title_report(pdf_name, result, target)
+            marker = target_dir / TITLE_SCAN_FILENAME
+            write_title_scan_marker(
+                marker,
+                pdf_name,
+                result,
+                report is not None,
+            )
+
+            for warning in result.warnings:
+                self.log(f"    ⚠️  {warning}")
+            if report is None:
+                self.log("    ⚠️  未识别到可用文章标题；已写入扫描状态")
+            else:
+                self.log(
+                    f"    ✓ 标题（{result.confidence}）：{result.title}"
+                )
+                self.log(f"    ✓ 提取方式：{result.extraction_method}")
+                self.log(f"    ✓ 已保存: {report}")
+            self.log(f"    ✓ 扫描状态: {marker}")
+            return True
+        except Exception as exc:
+            self.log(f"    ❌ 文章标题提取失败: {exc}")
             self.log(traceback.format_exc())
             return False
 

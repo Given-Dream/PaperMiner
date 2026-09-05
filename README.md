@@ -7,9 +7,9 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.22** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.22/PaperMiner-v1.4.22-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.22)
+当前开发版：**v1.4.23** · 最新公开版：[下载 v1.4.22 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.22/PaperMiner-v1.4.22-Setup.exe) · [查看 v1.4.22 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.22)
 
-当前源码与公开安装包均为 **v1.4.22**，包含 RTX 30/40/50 系 PyTorch CUDA wheel 匹配、自检与自动修复。
+当前源码为 **v1.4.23**；最新公开安装包为 **v1.4.22**。v1.4.23 新增可审计的文章标题提取与合并，继续包含 RTX 30/40/50 系 PyTorch CUDA wheel 匹配、自检与自动修复。
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -19,6 +19,7 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 
 | 能力 | 输出 |
 | --- | --- |
+| 文章标题 | 多证据交叉核验后生成逐篇 `Title/文章标题.md`，文件名回退会标记需核查 |
 | 正文提取 | 修复资源路径后的 Markdown |
 | 图片提取 | JPG/PNG、图号识别与映射表 |
 | 表格提取 | 表格图片与 Excel（`.xlsx`） |
@@ -29,6 +30,13 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 参考文献 | 优先读取 MinerU `ref_text`，按原文顺序生成逐篇 `References/参考文献.md` |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.23 文章标题提取与汇总
+
+- 标题属于元数据复制任务，不由 LLM 猜测或润色。程序对 MinerU 首页明确标题块/一级文本、Markdown 首部 H1/H2 和 PDF `/Title` 元数据赋予高权重，再以 PDF 首页文本和源文件名作低权重交叉核验；最终依据来源强度与独立证据是否一致评分，而不是盲信某一个字段。
+- `Abstract`、`Introduction`、`References`、版权文字、URL/DOI、纯文章类型等明显非标题候选会被过滤。只有源文件名可用或证据较弱时，报告显示“需核查”，提醒用户查看原 PDF 首页。
+- 每篇输出 `Title/文章标题.md` 和 `Title/title_scan.json`。后者记录最终标题、置信度、提取方式、候选评分和警告，供跳过判断、异常恢复及人工审计使用。
+- “合并文章标题、同名章节、图表、代码/数据地址和参考文献”新增 `MergedSections/文章标题_合并.md`，逐篇列出识别标题、来源 PDF 文件名和置信度；同题论文不会被静默去重。
 
 ## v1.4.22 RTX 30/40/50 CUDA 自检与修复
 
@@ -298,6 +306,9 @@ output/
 └─ extract/
    ├─ [论文名]/
    │  ├─ [论文名].md
+   │  ├─ Title/
+   │  │  ├─ title_scan.json
+   │  │  └─ 文章标题.md
    │  ├─ Figure/
    │  ├─ Tables/
    │  ├─ Formula/
@@ -310,6 +321,7 @@ output/
    │  │  └─ 参考文献.md          # 识别到可信条目时生成
    │  └─ Word/
    └─ MergedSections/
+      ├─ 文章标题_合并.md
       ├─ [章节名]_合并.md
       ├─ 图表汇总_合并.md
       ├─ 代码与数据可用性_合并.md
@@ -320,7 +332,9 @@ output/
 
 `References/参考文献.md` 保持原文顺序和编号。其首选数据源是 MinerU 的 `ref_text`，Markdown 标题和文末连续编号只作回退；程序不会通过 LLM 猜测缺失条目，也不会联网补齐书目信息。
 
-点击“合并同名章节、图表、代码/数据地址和参考文献”后，同名章节按原规则分别汇总；图表读取每篇论文 `Word` 文件夹中的 Markdown；代码与数据地址只汇总实际含可信链接的 `OpenSource/代码与数据可用性.md`；参考文献读取每篇论文中确实含条目的 `References/参考文献.md`，并生成按论文分组的 `参考文献_合并.md`。参考文献保留各论文内部的原顺序和原编号，不跨论文去重或改写。图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。LLM 只核验代码/数据候选链接，不保证外部资源长期有效，访问、引用或运行前仍应结合论文原文人工确认。
+`Title/文章标题.md` 保存最终标题及证据等级；`title_scan.json` 进一步保留候选与评分。标题只做来源交叉核验，不使用 LLM 补写；“需核查”的结果应以原 PDF 首页为准。
+
+点击“合并文章标题、同名章节、图表、代码/数据地址和参考文献”后，文章标题逐篇写入 `文章标题_合并.md`；同名章节按原规则分别汇总；图表读取每篇论文 `Word` 文件夹中的 Markdown；代码与数据地址只汇总实际含可信链接的 `OpenSource/代码与数据可用性.md`；参考文献读取每篇论文中确实含条目的 `References/参考文献.md`，并生成按论文分组的 `参考文献_合并.md`。标题和参考文献均不跨论文去重。参考文献保留各论文内部的原顺序和原编号，不改写。图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。LLM 只核验代码/数据候选链接，不保证外部资源长期有效，访问、引用或运行前仍应结合论文原文人工确认。
 
 ## 重装与卸载
 

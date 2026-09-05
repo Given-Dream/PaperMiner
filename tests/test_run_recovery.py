@@ -18,6 +18,7 @@ from run_recovery import (
 
 
 OPTIONS = {
+    "extract_title": True,
     "extract_text": True,
     "extract_formula": True,
     "extract_figures": True,

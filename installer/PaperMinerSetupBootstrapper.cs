@@ -13,8 +13,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Single-file PaperMiner installer")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.22.0")]
-[assembly: AssemblyFileVersion("1.4.22.0")]
+[assembly: AssemblyVersion("1.4.23.0")]
+[assembly: AssemblyFileVersion("1.4.23.0")]
 
 internal static class PaperMinerSetupBootstrapper
 {
@@ -126,7 +126,7 @@ internal sealed class SetupForm : Form
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
         Label title = new Label();
-        title.Text = "PaperMiner 1.4.22";
+        title.Text = "PaperMiner 1.4.23";
         title.Font = new Font(Font.FontFamily, 18F, FontStyle.Bold);
         title.Location = new Point(30, 25);
         title.AutoSize = true;
@@ -758,7 +758,8 @@ internal static class InstallerEngine
         "scripts/batch_pdf_processor_gui.py",
         "scripts/mineru_path_policy.py",
         "scripts/torch_runtime_policy.py",
-        "scripts/run_recovery.py"
+        "scripts/run_recovery.py",
+        "scripts/title_extractor.py"
     };
 
     public static string GetDefaultInstallDirectory()
@@ -1377,8 +1378,8 @@ internal static class InstallerEngine
     {
         using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UninstallRegistryPath))
         {
-            key.SetValue("DisplayName", "PaperMiner 1.4.22", RegistryValueKind.String);
-            key.SetValue("DisplayVersion", "1.4.22", RegistryValueKind.String);
+            key.SetValue("DisplayName", "PaperMiner 1.4.23", RegistryValueKind.String);
+            key.SetValue("DisplayVersion", "1.4.23", RegistryValueKind.String);
             key.SetValue("Publisher", "PaperMiner Recovery", RegistryValueKind.String);
             key.SetValue("InstallLocation", installDirectory, RegistryValueKind.String);
             key.SetValue("DisplayIcon", Path.Combine(installDirectory, "PaperMiner.exe"), RegistryValueKind.String);

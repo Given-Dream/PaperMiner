@@ -1,4 +1,4 @@
-"""Merge article sections, chart summaries, availability, and references."""
+"""Merge article titles, sections, chart summaries, availability, and references."""
 import json
 import os
 from pathlib import Path
@@ -162,6 +162,48 @@ def find_reference_markdowns(extract_root: Path):
             entry_count = _count_reference_entries(content)
             if entry_count > 0:
                 result.append((_article_title(article_dir), source, entry_count))
+    return result
+
+
+def find_title_markdowns(extract_root: Path):
+    """Return completed per-paper title reports and their audited result.
+
+    Title reports are accepted only when the matching scan marker says the scan
+    completed and the report was written.  This avoids merging a stale report
+    left by a previous run with different extraction options.
+    """
+    result = []
+    article_dirs = sorted(
+        (path for path in extract_root.iterdir() if path.is_dir()),
+        key=lambda path: path.name.casefold(),
+    ) if extract_root.exists() else []
+    for article_dir in article_dirs:
+        if article_dir.name == "MergedSections":
+            continue
+        title_dir = article_dir / "Title"
+        marker = title_dir / "title_scan.json"
+        report = title_dir / "文章标题.md"
+        if not marker.is_file():
+            continue
+        try:
+            scan = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+            if (
+                not isinstance(scan, dict)
+                or scan.get("schema_version") != 1
+                or scan.get("scan_completed") is not True
+                or scan.get("report_written") is not True
+            ):
+                continue
+            title = str(scan.get("title") or "").strip()
+            confidence = str(scan.get("confidence") or "未标注").strip()
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if not title or not report.is_file() or report.stat().st_size <= 0:
+            continue
+        report_text = report.read_text(encoding="utf-8", errors="replace")
+        if title not in report_text:
+            continue
+        result.append((_article_title(article_dir), title, confidence, report))
     return result
 
 
@@ -454,6 +496,31 @@ def merge_reference_markdowns(extract_root: Path, target: Path, sources=None):
     return target, len(sources), total_entries
 
 
+def merge_title_markdowns(extract_root: Path, target: Path, sources=None):
+    """Merge audited article titles without silently deduplicating papers."""
+    sources = find_title_markdowns(extract_root) if sources is None else sources
+    if not sources:
+        raise ValueError("未找到已完成的文章标题 Markdown")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    review_count = sum(confidence in {"需核查", "未识别"} for _, _, confidence, _ in sources)
+    chunks = [
+        "# 文章标题汇总\n",
+        "> 来源：各论文 Title/文章标题.md；按输入论文逐篇列出，不跨论文去重。\n",
+        f"> 共汇总 {len(sources)} 篇论文；其中 {review_count} 篇需要人工核查原 PDF 首页。\n",
+    ]
+    for index, (source_stem, title, confidence, _report) in enumerate(sources, start=1):
+        chunks.extend(
+            (
+                f"\n## {index}. {title}\n",
+                f"\n- 来源文件：{source_stem}.pdf\n",
+                f"- 置信度：{confidence}\n",
+            )
+        )
+    target.write_text("\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+    return target, len(sources), review_count
+
+
 def merge_all_sections_and_charts_to_markdown(
     extract_root: Path,
     output_path: Path,
@@ -490,18 +557,35 @@ def merge_all_sections_charts_code_and_references_to_markdown(
     extract_root: Path,
     output_path: Path,
 ):
-    """Merge sections, charts, code/data reports, and per-paper references."""
+    """Merge titles, sections, charts, code/data reports, and references."""
+    title_sources = find_title_markdowns(extract_root)
     grouped = find_sections(extract_root)
     chart_sources = find_chart_markdowns(extract_root)
     code_sources = find_open_source_markdowns(extract_root)
     reference_sources = find_reference_markdowns(extract_root)
-    if not grouped and not chart_sources and not code_sources and not reference_sources:
+    if (
+        not title_sources
+        and not grouped
+        and not chart_sources
+        and not code_sources
+        and not reference_sources
+    ):
         raise ValueError(
-            "未找到可合并的章节、图表、代码/数据可用性或参考文献 Markdown"
+            "未找到可合并的文章标题、章节、图表、代码/数据可用性或参考文献 Markdown"
         )
 
     output_path.mkdir(parents=True, exist_ok=True)
     outputs = []
+    title_source_count = 0
+    title_review_count = 0
+    if title_sources:
+        title_output, title_source_count, title_review_count = merge_title_markdowns(
+            extract_root,
+            output_path / "文章标题_合并.md",
+            title_sources,
+        )
+        outputs.append(title_output)
+
     total_section_articles = 0
     if grouped:
         section_outputs, total_section_articles = _write_section_markdowns(
@@ -552,6 +636,8 @@ def merge_all_sections_charts_code_and_references_to_markdown(
         code_link_count,
         reference_source_count,
         reference_entry_count,
+        title_source_count,
+        title_review_count,
     )
 
 

@@ -11,9 +11,11 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from section_merger import (
     find_reference_markdowns,
+    find_title_markdowns,
     merge_all_sections_charts_and_code_to_markdown,
     merge_all_sections_charts_code_and_references_to_markdown,
     merge_reference_markdowns,
+    merge_title_markdowns,
 )
 
 
@@ -43,6 +45,29 @@ def _write_marker(article_dir: Path, entry_count: int, report_written: bool) -> 
         encoding="utf-8",
     )
     return marker
+
+
+def _write_title(article_dir: Path, title: str, confidence: str = "高") -> Path:
+    report = article_dir / "Title" / "文章标题.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        f"# 文章标题\n\n## 识别结果\n\n{title}\n",
+        encoding="utf-8",
+    )
+    (report.parent / "title_scan.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scan_completed": True,
+                "title": title,
+                "confidence": confidence,
+                "report_written": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return report
 
 
 class ReferenceDiscoveryTests(unittest.TestCase):
@@ -161,11 +186,12 @@ class ReferenceMergeTests(unittest.TestCase):
                 target,
             )
 
-            self.assertEqual(len(result), 8)
-            outputs, section_articles, sections, charts, reports, links, papers, entries = result
+            self.assertEqual(len(result), 10)
+            outputs, section_articles, sections, charts, reports, links, papers, entries, titles, reviews = result
             self.assertEqual(outputs, [target / "参考文献_合并.md"])
             self.assertEqual((section_articles, sections, charts, reports, links), (0, 0, 0, 0, 0))
             self.assertEqual((papers, entries), (1, 1))
+            self.assertEqual((titles, reviews), (0, 0))
 
     def test_legacy_six_field_api_still_generates_reference_output(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -182,6 +208,46 @@ class ReferenceMergeTests(unittest.TestCase):
 
             self.assertEqual(len(result), 6)
             self.assertTrue((target / "参考文献_合并.md").is_file())
+
+
+class TitleMergeTests(unittest.TestCase):
+    def test_title_reports_are_merged_with_review_count(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            extract_root = Path(temporary) / "extract"
+            first = extract_root / "paper-a"
+            second = extract_root / "paper-b"
+            first_report = _write_title(first, "First Extracted Article Title")
+            _write_title(second, "第二篇论文标题", "需核查")
+
+            sources = find_title_markdowns(extract_root)
+            self.assertEqual(sources[0], ("paper-a", "First Extracted Article Title", "高", first_report))
+
+            target = extract_root / "MergedSections" / "文章标题_合并.md"
+            output, title_count, review_count = merge_title_markdowns(
+                extract_root,
+                target,
+            )
+            self.assertEqual(output, target)
+            self.assertEqual((title_count, review_count), (2, 1))
+            content = target.read_text(encoding="utf-8")
+            self.assertIn("First Extracted Article Title", content)
+            self.assertIn("第二篇论文标题", content)
+            self.assertIn("不跨论文去重", content)
+
+    def test_full_merge_can_run_with_titles_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            extract_root = Path(temporary) / "extract"
+            _write_title(extract_root / "paper", "A Standalone Paper Title")
+            target = extract_root / "MergedSections"
+
+            result = merge_all_sections_charts_code_and_references_to_markdown(
+                extract_root,
+                target,
+            )
+
+            self.assertEqual(len(result), 10)
+            self.assertEqual(result[0], [target / "文章标题_合并.md"])
+            self.assertEqual(result[8:], (1, 0))
 
 
 if __name__ == "__main__":

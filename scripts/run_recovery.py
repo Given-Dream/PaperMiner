@@ -54,6 +54,7 @@ def completion_options_signature(options: dict | None) -> str:
     """Hash only options that materially affect a document's final output."""
     options = options if isinstance(options, dict) else {}
     relevant_keys = (
+        "extract_title",
         "extract_text",
         "extract_formula",
         "extract_figures",
