@@ -53,6 +53,10 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PaperMiner isolated MinerU worker")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--document-name",
+        help="Bounded single-component output name selected by PaperMiner",
+    )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--backend", default="pipeline")
     parser.add_argument("--model-source", default="modelscope")
@@ -73,6 +77,16 @@ def main() -> int:
     if not input_path.is_file():
         print(f"[WORKER ERROR] 输入 PDF 不存在: {input_path}", flush=True)
         return 10
+
+    document_name = args.document_name or input_path.stem
+    if (
+        document_name in {"", ".", ".."}
+        or Path(document_name).name != document_name
+        or "/" in document_name
+        or "\\" in document_name
+    ):
+        print(f"[WORKER ERROR] 非法文档目录名: {document_name!r}", flush=True)
+        return 13
 
     os.environ["MINERU_DEVICE_MODE"] = args.device
     os.environ["MINERU_MODEL_SOURCE"] = args.model_source
@@ -112,13 +126,15 @@ def main() -> int:
         )
         print(f"输入: {input_path.name}", flush=True)
         print(f"输出: {output_path}", flush=True)
+        if document_name != input_path.stem:
+            print(f"路径保护: 使用短目录 {document_name}", flush=True)
         print("正在处理，请稍候...", flush=True)
 
         output_path.mkdir(parents=True, exist_ok=True)
         pdf_bytes = read_fn(input_path)
         do_parse(
             output_dir=str(output_path),
-            pdf_file_names=[input_path.stem],
+            pdf_file_names=[document_name],
             pdf_bytes_list=[pdf_bytes],
             p_lang_list=["ch"],
             backend=args.backend,

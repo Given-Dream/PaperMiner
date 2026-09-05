@@ -9,7 +9,7 @@
 
 当前版本：**v1.4.18** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.18/PaperMiner-v1.4.18-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)
 
-当前开发版：**v1.4.19**（新增文末参考文献 Markdown 提取；公开安装包仍以 Release 页面为准）
+当前开发版：**v1.4.20**（新增 Windows 长路径自动规避；公开安装包仍以 Release 页面为准）
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -29,6 +29,13 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 参考文献 | 优先读取 MinerU `ref_text`，按原文顺序生成逐篇 `References/参考文献.md` |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.20 Windows 长路径保护
+
+- MinerU 会把论文标题用作 raw 子目录，并在 `auto/images` 下写入 64 位哈希图片名。程序现在会在启动每篇任务前计算最深预计路径；接近传统 Win32 `MAX_PATH` 边界时，自动改用带稳定哈希的短内部目录。
+- 短目录中的 `.paperminer-source.json` 保存完整原论文名和来源路径；并行 GPU 定位、异常恢复和“仅提取”会读取该映射，不依赖模糊的“最近目录”匹配。
+- 最终 `extract` 目录只要安全就继续使用完整论文标题；若“标题目录 + 标题文件名”过长，正文和公式汇总分别使用 `全文.md`、`公式.md`，文件内容中的论文标题不变。
+- 如果用户选择的输出根本身已经过深，程序会在 MinerU 启动前给出明确错误。此时应选择类似 `D:\\PaperMinerOutput` 的短目录。
 
 ## v1.4.19 参考文献提取
 

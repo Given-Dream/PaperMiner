@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.19"
+    __version__ = "1.4.20"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -148,6 +148,15 @@ try:
         completion_marker_matches,
         write_completion_marker,
     )
+    from mineru_path_policy import (
+        DocumentPathTooLongError,
+        choose_child_filename,
+        choose_extract_storage_name,
+        choose_mineru_storage_name,
+        read_source_manifest,
+        source_stem_for_directory,
+        write_source_manifest,
+    )
 except ImportError:
     from scripts.run_recovery import (
         INFLIGHT_DOCUMENT_STATES,
@@ -155,6 +164,15 @@ except ImportError:
         RunRecoveryStore,
         completion_marker_matches,
         write_completion_marker,
+    )
+    from scripts.mineru_path_policy import (
+        DocumentPathTooLongError,
+        choose_child_filename,
+        choose_extract_storage_name,
+        choose_mineru_storage_name,
+        read_source_manifest,
+        source_stem_for_directory,
+        write_source_manifest,
     )
 
 # 设置标准输出编码为 UTF-8。
@@ -457,6 +475,7 @@ class BatchPDFProcessorGUI:
         "mineru_missing",
         "unsupported_mineru_version",
         "mineru_worker_missing",
+        "mineru_output_root_too_long",
     }
 
     def __init__(self, root):
@@ -1546,7 +1565,13 @@ class BatchPDFProcessorGUI:
 
     def _finalize_document_success(self, source_path, pdf_name: str) -> bool:
         """Publish the completion marker before committing ``complete``."""
-        extract_directory = self.extract_output_path / pdf_name
+        extract_directory = self.find_extract_output_dir(pdf_name)
+        if extract_directory is None:
+            try:
+                extract_directory = self._planned_extract_directory(pdf_name)
+            except DocumentPathTooLongError as exc:
+                self.log(f"[ERROR] 完成标记路径不可用: {exc}")
+                return False
         try:
             marker = write_completion_marker(
                 extract_directory,
@@ -1781,6 +1806,22 @@ class BatchPDFProcessorGUI:
             ("extract", self.extract_output_path / pdf_name, self.extract_output_path),
             ("raw", self.raw_output_path / pdf_name, self.raw_output_path),
         ]
+        try:
+            mapped_extract = self.extract_output_path / choose_extract_storage_name(
+                pdf_name,
+                self.extract_output_path,
+            )
+            candidates.append(("extract", mapped_extract, self.extract_output_path))
+        except DocumentPathTooLongError:
+            pass
+        try:
+            mapped_raw = self.raw_output_path / choose_mineru_storage_name(
+                pdf_name,
+                self.raw_output_path,
+            )
+            candidates.append(("raw", mapped_raw, self.raw_output_path))
+        except DocumentPathTooLongError:
+            pass
         if raw_directory:
             raw_candidate = Path(raw_directory)
             if raw_candidate.name.lower() == "auto":
@@ -1938,11 +1979,15 @@ class BatchPDFProcessorGUI:
 
             for document in documents:
                 source = Path(document["source_path"])
-                pdf_name = source.stem if mode == "full" else source.name
+                pdf_name = (
+                    source.stem
+                    if mode == "full"
+                    else self._source_stem_from_raw_folder(source)
+                )
                 previous_status = document.get("previous_status", "pending")
-                extract_directory = self.extract_output_path / pdf_name
+                extract_directory = self.find_extract_output_dir(pdf_name)
 
-                if completion_marker_matches(
+                if extract_directory is not None and completion_marker_matches(
                     extract_directory,
                     options,
                     source_path=source,
@@ -3527,16 +3572,69 @@ class BatchPDFProcessorGUI:
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
 
+    def _find_mapped_document_directory(
+        self,
+        root: Path,
+        source_stem: str,
+        chooser,
+    ) -> 'Path | None':
+        """Find legacy, deterministic-short, or manifest-mapped output."""
+        direct = root / source_stem
+        if direct.exists():
+            return direct
+
+        try:
+            planned = root / chooser(source_stem, root)
+        except DocumentPathTooLongError:
+            planned = None
+        if planned is not None and planned.exists():
+            return planned
+
+        try:
+            for candidate in root.iterdir():
+                if not candidate.is_dir():
+                    continue
+                manifest = read_source_manifest(candidate)
+                if manifest and manifest.get("source_stem") == source_stem:
+                    return candidate
+        except OSError:
+            pass
+        return None
+
+    def _planned_extract_directory(self, pdf_name: str) -> Path:
+        storage_name = choose_extract_storage_name(pdf_name, self.extract_output_path)
+        return self.extract_output_path / storage_name
+
+    def find_extract_output_dir(self, pdf_name: str) -> 'Path | None':
+        return self._find_mapped_document_directory(
+            self.extract_output_path,
+            pdf_name,
+            choose_extract_storage_name,
+        )
+
+    def _find_raw_document_directory(self, pdf_name: str) -> 'Path | None':
+        return self._find_mapped_document_directory(
+            self.raw_output_path,
+            pdf_name,
+            choose_mineru_storage_name,
+        )
+
+    @staticmethod
+    def _source_stem_from_raw_folder(raw_folder: Path) -> str:
+        return source_stem_for_directory(raw_folder)
+
     def is_already_processed(self, pdf_name: str) -> bool:
         """Only trust v1.4.17+ output after its atomic completion marker."""
-        extract_dir = self.extract_output_path / pdf_name
-        if not extract_dir.exists():
+        extract_dir = self.find_extract_output_dir(pdf_name)
+        if extract_dir is None or not extract_dir.exists():
             return False
         marker_path = extract_dir / MARKER_NAME
         if marker_path.exists():
             mode = self.process_mode_var.get() if hasattr(self, "process_mode_var") else "full"
             if mode == "extract_only":
-                source_path = self.raw_output_path / pdf_name
+                source_path = self._find_raw_document_directory(pdf_name)
+                if source_path is None:
+                    source_path = self.raw_output_path / pdf_name
             else:
                 source_path = self.input_path / f"{pdf_name}.pdf"
                 if not source_path.exists():
@@ -3778,7 +3876,13 @@ class BatchPDFProcessorGUI:
 
             # 计算跳过数量
             if self.skip_processed_var.get():
-                skip_count = sum(1 for f in raw_folders if self.is_already_processed(f.name))
+                skip_count = sum(
+                    1
+                    for folder in raw_folders
+                    if self.is_already_processed(
+                        self._source_stem_from_raw_folder(folder)
+                    )
+                )
                 actual_count = len(raw_folders) - skip_count
             else:
                 skip_count = 0
@@ -4547,6 +4651,46 @@ class BatchPDFProcessorGUI:
 
             runtime_python = self._runtime_console_python()
 
+            pdf_name = pdf_file.stem
+            try:
+                storage_name = choose_mineru_storage_name(
+                    pdf_name,
+                    self.raw_output_path,
+                )
+                raw_document_directory = self.raw_output_path / storage_name
+                expected_raw_dir = raw_document_directory / "auto"
+                manifest = write_source_manifest(
+                    raw_document_directory,
+                    source_stem=pdf_name,
+                    source_path=pdf_file,
+                )
+            except DocumentPathTooLongError as exc:
+                self._set_mineru_issue(job_id, "mineru_output_root_too_long")
+                self.log(f"❌ MinerU 输出路径过深: {exc}")
+                self.log("  请在主界面把输出目录改到较短位置，例如 D:\\PaperMinerOutput。")
+                return None
+            except OSError as exc:
+                self._set_mineru_issue(job_id, "mineru_output_path_unwritable")
+                self.log(f"❌ 无法准备 MinerU 输出目录: {exc}")
+                return None
+
+            if storage_name != pdf_name:
+                self.log(
+                    "路径保护: 论文名较长，MinerU 内部目录改用 "
+                    f"{storage_name}"
+                )
+                self.log(f"  原论文名映射: {manifest}")
+
+            # 在启动原生推理进程前持久化实际 raw 位置。若机器随后异常退出，
+            # 恢复流程能准确隔离短目录，而不会误认其他并行任务的输出。
+            if not self._checkpoint_document(
+                pdf_file,
+                "parsing",
+                gpu_id=gpu_id,
+                raw_directory=expected_raw_dir,
+            ):
+                return None
+
             command = (
                 str(runtime_python),
                 "-u",
@@ -4555,6 +4699,8 @@ class BatchPDFProcessorGUI:
                 str(pdf_file),
                 "--output",
                 str(self.raw_output_path),
+                "--document-name",
+                storage_name,
                 "--device",
                 device,
                 "--backend",
@@ -4644,11 +4790,21 @@ class BatchPDFProcessorGUI:
                     self.log_mineru_diagnosis(diagnosis, output_tail)
                 return None
 
-            pdf_name = pdf_file.stem
             self.log("")
             self.log("✓ MinerU 处理完成")
-            raw_dir = self.find_raw_output_dir(pdf_name)
+            raw_dir = self.find_raw_output_dir(
+                pdf_name,
+                storage_name=storage_name,
+            )
             if raw_dir and self.validate_mineru_output(raw_dir):
+                try:
+                    write_source_manifest(
+                        raw_dir.parent,
+                        source_stem=pdf_name,
+                        source_path=pdf_file,
+                    )
+                except OSError as exc:
+                    self.log(f"  [路径] ⚠️ 无法刷新原论文名映射: {exc}")
                 self.log("✓ MinerU 输出验证通过")
                 return raw_dir
 
@@ -4740,7 +4896,34 @@ class BatchPDFProcessorGUI:
         if not output_lines:
             return None
 
-        text = "\n".join(output_lines).lower()
+        original_text = "\n".join(output_lines)
+        text = original_text.lower()
+        image_paths = re.findall(
+            r"[A-Za-z]:\\[^\r\n'\"]+?\.(?:jpe?g|png)",
+            original_text,
+            flags=re.IGNORECASE,
+        )
+        long_image_path = any(
+            len(candidate.replace("\\\\", "\\")) >= 248
+            for candidate in image_paths
+        )
+
+        if (
+            "filenotfounderror" in text
+            and "no such file or directory" in text
+            and ("auto\\images" in text or "auto/images" in text)
+            and ".jpg" in text
+            and long_image_path
+        ):
+            return {
+                "code": "mineru_windows_path_too_long",
+                "title": "Windows 路径过长，MinerU 无法写入裁剪图片",
+                "tips": [
+                    "这不是 GPU 或显存故障；旧版请把输出目录改为 D:\\PM_OUT 等短路径后重试",
+                    "也可临时缩短 PDF 文件名；不要直接删除失败目录，可先移动到备份位置",
+                    "v1.4.20 起会自动使用可追溯的短内部目录，通常不再需要改论文名",
+                ],
+            }
 
         if (
             "localentrynotfounderror" in text
@@ -4809,17 +4992,38 @@ class BatchPDFProcessorGUI:
             for tip in tips:
                 self.log(f"    - {tip}")
 
-    def find_raw_output_dir(self, pdf_name: str) -> 'Path | None':
+    def find_raw_output_dir(
+        self,
+        pdf_name: str,
+        storage_name: 'str | None' = None,
+    ) -> 'Path | None':
         """
         多策略查找 MinerU 输出目录。
         MinerU 可能因长文件名/特殊字符导致目录名与 pdf_name 不完全一致。
         """
-        # 策略1：精确匹配
+        # 策略0：本轮已明确指定的目录。并行任务必须只认自己的目录，
+        # 不能使用“最近创建”兜底误取另一个 GPU 工作槽的结果。
+        if storage_name:
+            expected = self.raw_output_path / storage_name / "auto"
+            if expected.exists():
+                return expected
+            self.log(f"  [路径] ❌ 未找到本轮预期输出目录: {expected}")
+            return None
+
+        # 策略1：精确匹配（兼容旧版本 raw 输出）
         exact = self.raw_output_path / pdf_name / "auto"
         if exact.exists():
             return exact
 
-        # 策略2：前缀 glob 匹配（取前50字符，处理长文件名截断）
+        # 策略2：当前版本的确定性短目录及清单映射。
+        mapped_document = self._find_raw_document_directory(pdf_name)
+        if mapped_document is not None and (mapped_document / "auto").exists():
+            mapped = mapped_document / "auto"
+            if mapped_document.name != pdf_name:
+                self.log(f"  [路径] 原论文名映射到短目录: {mapped}")
+            return mapped
+
+        # 策略3：前缀 glob 匹配（兼容 MinerU 历史版本的截断行为）
         prefix = pdf_name[:50].rstrip()
         try:
             candidates = [
@@ -4837,7 +5041,7 @@ class BatchPDFProcessorGUI:
             self.log(f"  [路径] 前缀匹配到多个目录，使用最新的: {best}")
             return best
 
-        # 策略3：查找最近10分钟内创建的 auto 目录
+        # 策略4：查找最近10分钟内创建的 auto 目录（仅旧调用兜底）
         now = time.time()
         recent = []
         try:
@@ -4897,7 +5101,7 @@ class BatchPDFProcessorGUI:
                     break
 
                 self.current_pdf_index = i
-                pdf_name = raw_folder.name
+                pdf_name = self._source_stem_from_raw_folder(raw_folder)
 
                 # 更新进度
                 self._post_ui(self.update_progress)
@@ -4928,7 +5132,10 @@ class BatchPDFProcessorGUI:
                     ):
                         break
                     # 提取内容（使用 PDF 名称作为参数）
-                    extract_ok = self.extract_and_organize(pdf_name)
+                    extract_ok = self.extract_and_organize(
+                        pdf_name,
+                        raw_dir=raw_folder / "auto",
+                    )
 
                     if extract_ok and self._finalize_document_success(
                         raw_folder,
@@ -5002,30 +5209,39 @@ class BatchPDFProcessorGUI:
             if actual_pdf_name != pdf_name:
                 self.log(f"  [路径] 实际目录名与传入名称不同: {actual_pdf_name}")
 
-            # 创建提取目录（在extract下为每个PDF创建子文件夹）
-            extract_pdf_dir = self.extract_output_path / pdf_name
-            extract_pdf_dir.mkdir(parents=True, exist_ok=True)
+            # 创建提取目录。极端长标题会使用稳定短目录，并在目录内记录
+            # 原论文名；普通标题仍保持原有可读目录名。
+            extract_pdf_dir = self._planned_extract_directory(pdf_name)
+            manifest = write_source_manifest(
+                extract_pdf_dir,
+                source_stem=pdf_name,
+            )
+            if extract_pdf_dir.name != pdf_name:
+                self.log(
+                    f"  [路径] 最终结果使用短目录: {extract_pdf_dir.name}；"
+                    f"原名记录于 {manifest.name}"
+                )
 
             any_success = False
 
             # 提取文字 (Markdown) - 保存到extract/pdf_name/pdf_name.md
             if self._run_option("extract_text", True):
-                if self.extract_text(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
+                if self.extract_text(raw_pdf_dir, extract_pdf_dir, pdf_name):
                     any_success = True
 
             # 提取公式 - 保存到extract/pdf_name/Formula/
             if self._run_option("extract_formula", True):
-                if self.extract_formulas(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
+                if self.extract_formulas(raw_pdf_dir, extract_pdf_dir, pdf_name):
                     any_success = True
 
             # 提取图片 - 保存到extract/pdf_name/Figure/
             if self._run_option("extract_figures", True):
-                if self.extract_figures(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
+                if self.extract_figures(raw_pdf_dir, extract_pdf_dir, pdf_name):
                     any_success = True
 
             # 提取表格 - 保存到extract/pdf_name/Tables/
             if self._run_option("extract_tables", True):
-                if self.extract_tables(raw_pdf_dir, extract_pdf_dir, actual_pdf_name):
+                if self.extract_tables(raw_pdf_dir, extract_pdf_dir, pdf_name):
                     any_success = True
 
             # 识别论文末尾的代码与数据可用性链接；有可信结果时保存 Markdown。
@@ -5033,7 +5249,7 @@ class BatchPDFProcessorGUI:
                 if self.extract_open_source_code_addresses(
                     raw_pdf_dir,
                     extract_pdf_dir,
-                    actual_pdf_name,
+                    pdf_name,
                 ):
                     any_success = True
 
@@ -5042,17 +5258,17 @@ class BatchPDFProcessorGUI:
                 if self.extract_reference_list(
                     raw_pdf_dir,
                     extract_pdf_dir,
-                    actual_pdf_name,
+                    pdf_name,
                 ):
                     any_success = True
 
             # 先创建 Word 文件夹（不依赖 LLM），避免 LLM 长耗时或失败时丢失 Word/docx 产出
             if self._run_option("extract_figures", True) or self._run_option("extract_tables", True):
-                self.create_word_folder(raw_pdf_dir, extract_pdf_dir, actual_pdf_name)
+                self.create_word_folder(raw_pdf_dir, extract_pdf_dir, pdf_name)
 
             # 最后跑 LLM 章节提取（可能很慢，放最后即使超时/失败也不影响上面的产出）
             if self._run_option("extract_sections", True):
-                self.extract_sections_with_llm(raw_pdf_dir, extract_pdf_dir, actual_pdf_name)
+                self.extract_sections_with_llm(raw_pdf_dir, extract_pdf_dir, pdf_name)
 
             if any_success:
                 self.log("✓ 提取和整理完成")
@@ -5244,7 +5460,14 @@ class BatchPDFProcessorGUI:
             for old_path, new_path in image_mapping.items():
                 content = content.replace(f"]({old_path})", f"]({new_path})")
 
-            output_md = extract_dir / f"{pdf_name}.md"
+            output_name = choose_child_filename(
+                extract_dir,
+                f"{pdf_name}.md",
+                "全文.md",
+            )
+            output_md = extract_dir / output_name
+            if output_name == "全文.md":
+                self.log("    [路径] 论文标题较长，正文改用短文件名：全文.md")
             with open(output_md, 'w', encoding='utf-8') as f:
                 f.write(content)
 
@@ -5307,7 +5530,14 @@ class BatchPDFProcessorGUI:
 
             # 保存文本公式到 Markdown 文件
             if text_formulas:
-                formula_md = formula_dir / f"{pdf_name}_formula.md"
+                formula_name = choose_child_filename(
+                    formula_dir,
+                    f"{pdf_name}_formula.md",
+                    "公式.md",
+                )
+                formula_md = formula_dir / formula_name
+                if formula_name == "公式.md":
+                    self.log("    [路径] 论文标题较长，公式汇总改用短文件名：公式.md")
                 with open(formula_md, 'w', encoding='utf-8') as f:
                     f.write(f"# {pdf_name} - 公式\n\n")
                     for i, formula in enumerate(text_formulas, 1):
@@ -6397,14 +6627,15 @@ class BatchPDFProcessorGUI:
 
             # 保存 Word 文档；若完整路径预计超过 Windows MAX_PATH (260)，
             # 退化到短文件名 "图表.docx" 以保证 Word 能打开（目录名仍保留完整 pdf_name 供导航）。
-            # 留 10 字符余量给 ".docx"/"_图表汇总.md" 等后缀。
             default_name = f"{pdf_name}_图表.docx"
-            default_path = word_dir / default_name
-            if len(str(default_path.resolve())) > 245:
-                self.log(f"    ⚠️  完整路径过长 ({len(str(default_path.resolve()))} > 245)，改用短文件名 '图表.docx'")
-                output_doc = word_dir / "图表.docx"
-            else:
-                output_doc = default_path
+            output_doc_name = choose_child_filename(
+                word_dir,
+                default_name,
+                "图表.docx",
+            )
+            output_doc = word_dir / output_doc_name
+            if output_doc_name == "图表.docx":
+                self.log("    ⚠️  完整路径过长，改用短文件名 '图表.docx'")
             doc.save(str(output_doc))
             # python-docx 偶发 bug：保存后 zip 里缺失 numbering.xml 等被 rels/Content_Types 声明的部件，
             # 导致 Word 打开时报"损坏"。在这里自愈一下：把声明了但缺失的 XML 部件补个最小占位。
@@ -6412,11 +6643,12 @@ class BatchPDFProcessorGUI:
 
             # 保存 Markdown 图表汇总；同样对长路径做兜底
             default_md_name = f"{pdf_name}_图表汇总.md"
-            default_md_path = word_dir / default_md_name
-            if len(str(default_md_path.resolve())) > 245:
-                md_summary_file = word_dir / "图表汇总.md"
-            else:
-                md_summary_file = default_md_path
+            md_summary_name = choose_child_filename(
+                word_dir,
+                default_md_name,
+                "图表汇总.md",
+            )
+            md_summary_file = word_dir / md_summary_name
             with open(md_summary_file, 'w', encoding='utf-8') as f:
                 f.writelines(md_summary_lines)
 
