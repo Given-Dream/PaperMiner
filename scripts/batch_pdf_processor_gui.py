@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.20"
+    __version__ = "1.4.21"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -88,7 +88,8 @@ except ImportError as exc:
 
 try:
     from section_merger import (
-        merge_all_sections_charts_and_code_to_markdown as merge_sections_charts_and_code_files,
+        merge_all_sections_charts_code_and_references_to_markdown
+        as merge_sections_charts_code_and_reference_files,
     )
     from open_source_extractor import (
         AVAILABILITY_REPORT_FILENAME,
@@ -108,7 +109,8 @@ try:
     )
 except ImportError:
     from scripts.section_merger import (
-        merge_all_sections_charts_and_code_to_markdown as merge_sections_charts_and_code_files,
+        merge_all_sections_charts_code_and_references_to_markdown
+        as merge_sections_charts_code_and_reference_files,
     )
     from scripts.open_source_extractor import (
         AVAILABILITY_REPORT_FILENAME,
@@ -2819,7 +2821,7 @@ class BatchPDFProcessorGUI:
         ).grid(row=1, column=2, sticky=(tk.W, tk.E), padx=(3, 0))
         self.merge_markdown_button = ttk.Button(
             output_frame,
-            text='合并同名章节、图表和代码/数据地址',
+            text='合并同名章节、图表、代码/数据地址和参考文献',
             command=self.merge_all_sections_and_charts_to_markdown,
             bootstyle='info',
         )
@@ -3312,7 +3314,7 @@ class BatchPDFProcessorGUI:
 
         self.merge_markdown_button = ttk.Button(
             output_frame,
-            text="合并同名章节、图表和代码/数据地址",
+            text="合并同名章节、图表、代码/数据地址和参考文献",
             command=self.merge_all_sections_and_charts_to_markdown,
         )
         self.merge_markdown_button.grid(
@@ -3374,7 +3376,7 @@ class BatchPDFProcessorGUI:
             self.log(f"⚠️  无法保存当前 LLM 模型: {exc}")
 
     def merge_all_sections_and_charts_to_markdown(self):
-        """合并同名章节、图表，以及逐篇代码/数据可用性报告。"""
+        """合并章节、图表、代码/数据可用性和逐篇参考文献报告。"""
         target = self.extract_output_path / "MergedSections"
         try:
             (
@@ -3384,7 +3386,9 @@ class BatchPDFProcessorGUI:
                 chart_count,
                 code_source_count,
                 code_link_count,
-            ) = merge_sections_charts_and_code_files(
+                reference_source_count,
+                reference_entry_count,
+            ) = merge_sections_charts_code_and_reference_files(
                 self.extract_output_path,
                 target,
             )
@@ -3403,6 +3407,9 @@ class BatchPDFProcessorGUI:
         self.log(
             f"  - 代码/数据地址：汇总 {code_source_count} 篇论文，可信地址 {code_link_count} 个"
         )
+        self.log(
+            f"  - 参考文献：汇总 {reference_source_count} 篇论文，累计 {reference_entry_count} 条"
+        )
         for output in outputs:
             self.log(f"  - {output}")
         messagebox.showinfo(
@@ -3411,6 +3418,7 @@ class BatchPDFProcessorGUI:
                 f"已生成 {len(outputs)} 个 Markdown 文件。\n"
                 f"同名章节：{section_count} 类；图表来源：{chart_count} 个；\n"
                 f"代码/数据报告：{code_source_count} 篇，地址：{code_link_count} 个。\n"
+                f"参考文献报告：{reference_source_count} 篇，共 {reference_entry_count} 条。\n"
                 f"输出目录：{target}"
             ),
         )
@@ -6057,7 +6065,7 @@ class BatchPDFProcessorGUI:
             result = extract_references(markdown_content, content_list)
             target_dir = extract_dir / "References"
             target = target_dir / REFERENCE_REPORT_FILENAME
-            report = write_reference_report(extract_dir.name, result, target)
+            report = write_reference_report(pdf_name, result, target)
             marker = target_dir / REFERENCE_SCAN_FILENAME
             write_reference_scan_marker(marker, result, report is not None)
 

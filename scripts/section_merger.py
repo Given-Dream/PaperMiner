@@ -1,8 +1,21 @@
-"""Merge article sections, chart summaries, and open-source links."""
+"""Merge article sections, chart summaries, availability, and references."""
 import json
 import os
 from pathlib import Path
 import re
+
+
+def _article_title(article_dir: Path) -> str:
+    """Restore the full source title when path protection shortened a folder."""
+    manifest = article_dir / ".paperminer-source.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return article_dir.name
+    source_stem = payload.get("source_stem") if isinstance(payload, dict) else None
+    if isinstance(source_stem, str) and source_stem.strip():
+        return source_stem.strip()
+    return article_dir.name
 
 
 def find_sections(extract_root: Path):
@@ -22,7 +35,7 @@ def find_sections(extract_root: Path):
     for sections_dir in extract_root.glob("*/Sections"):
         if not sections_dir.is_dir():
             continue
-        title = sections_dir.parent.name
+        title = _article_title(sections_dir.parent)
         for path in sorted(sections_dir.glob("*.md")):
             result.setdefault(path.stem, []).append((title, path))
     return result
@@ -49,7 +62,7 @@ def find_chart_markdowns(extract_root: Path):
             key=lambda path: path.name.casefold(),
         )
         for path in markdown_files:
-            result.append((article_dir.name, path))
+            result.append((_article_title(article_dir), path))
     return result
 
 
@@ -81,14 +94,74 @@ def find_open_source_markdowns(extract_root: Path):
             if source.is_file() and source.stat().st_size > 0:
                 content = source.read_text(encoding="utf-8", errors="replace")
                 if re.search(r"(?m)^- 地址：", content):
-                    result.append((article_dir.name, source))
+                    result.append((_article_title(article_dir), source))
             continue
 
         legacy = source_dir / "开源代码地址.md"
         if legacy.is_file() and legacy.stat().st_size > 0:
             content = legacy.read_text(encoding="utf-8", errors="replace")
             if re.search(r"(?m)^- 地址：", content):
-                result.append((article_dir.name, legacy))
+                result.append((_article_title(article_dir), legacy))
+    return result
+
+
+def _count_reference_entries(content: str) -> int:
+    """Conservatively count ordered bibliography lines in a saved report."""
+    return len(
+        re.findall(
+            r"(?m)^\s*(?:[-*+]\s+)?(?:"
+            r"\[\s*[A-Za-z]?\s*\d+\s*\]|"
+            r"\(\s*[A-Za-z]?\s*\d+\s*\)|"
+            r"[A-Za-z]?\s*\d+\s*[.)．、]"
+            r")\s+\S",
+            content,
+        )
+    )
+
+
+def find_reference_markdowns(extract_root: Path):
+    """Return ``(article_title, report_path, entry_count)`` for references.
+
+    A completed zero-result marker suppresses a stale report.  Reports from
+    older/custom runs without a marker are accepted only when numbered
+    bibliography entries can actually be counted.
+    """
+    result = []
+    article_dirs = sorted(
+        (path for path in extract_root.iterdir() if path.is_dir()),
+        key=lambda path: path.name.casefold(),
+    ) if extract_root.exists() else []
+    for article_dir in article_dirs:
+        if article_dir.name == "MergedSections":
+            continue
+        source_dir = article_dir / "References"
+        source = source_dir / "参考文献.md"
+        marker = source_dir / "references_scan.json"
+        if marker.is_file():
+            try:
+                scan = json.loads(marker.read_text(encoding="utf-8", errors="replace"))
+                if not isinstance(scan, dict) or scan.get("scan_completed") is not True:
+                    continue
+                entry_count = int(scan.get("entry_count", 0))
+                report_written = scan.get("report_written") is True
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if entry_count <= 0 or not report_written:
+                continue
+            if source.is_file() and source.stat().st_size > 0:
+                content = source.read_text(encoding="utf-8", errors="replace")
+                actual_entry_count = _count_reference_entries(content)
+                if actual_entry_count > 0:
+                    result.append(
+                        (_article_title(article_dir), source, actual_entry_count)
+                    )
+            continue
+
+        if source.is_file() and source.stat().st_size > 0:
+            content = source.read_text(encoding="utf-8", errors="replace")
+            entry_count = _count_reference_entries(content)
+            if entry_count > 0:
+                result.append((_article_title(article_dir), source, entry_count))
     return result
 
 
@@ -355,6 +428,32 @@ def merge_open_source_markdowns(extract_root: Path, target: Path, sources=None):
     return target, len(sources), total_links
 
 
+def merge_reference_markdowns(extract_root: Path, target: Path, sources=None):
+    """Merge per-paper reference reports without deduplication or rewriting."""
+    sources = find_reference_markdowns(extract_root) if sources is None else sources
+    if not sources:
+        raise ValueError("未找到含参考文献条目的 Markdown")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    total_entries = sum(max(0, int(entry_count)) for _, _, entry_count in sources)
+    chunks = [
+        "# 参考文献汇总\n",
+        "> 来源：各论文 References/参考文献.md。按论文分组保留原顺序和原编号，不跨论文去重或改写。\n",
+        f"> 共汇总 {len(sources)} 篇论文，累计 {total_entries} 条参考文献；正式引用前请与原 PDF 核对。\n",
+    ]
+    for article_title, source, _entry_count in sources:
+        content = source.read_text(encoding="utf-8", errors="replace")
+        content = _prepare_chart_markdown(content, source, target, extract_root)
+        chunks.append(f"\n## 【{article_title}】\n")
+        if content:
+            chunks.append(f"\n{content}\n")
+        else:
+            chunks.append("\n> 此参考文献报告为空。\n")
+
+    target.write_text("\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+    return target, len(sources), total_entries
+
+
 def merge_all_sections_and_charts_to_markdown(
     extract_root: Path,
     output_path: Path,
@@ -387,16 +486,19 @@ def merge_all_sections_and_charts_to_markdown(
     return outputs, total_section_articles, len(grouped), chart_count
 
 
-def merge_all_sections_charts_and_code_to_markdown(
+def merge_all_sections_charts_code_and_references_to_markdown(
     extract_root: Path,
     output_path: Path,
 ):
-    """Merge same-named sections, chart summaries, and code/data reports."""
+    """Merge sections, charts, code/data reports, and per-paper references."""
     grouped = find_sections(extract_root)
     chart_sources = find_chart_markdowns(extract_root)
     code_sources = find_open_source_markdowns(extract_root)
-    if not grouped and not chart_sources and not code_sources:
-        raise ValueError("未找到可合并的章节、图表或代码/数据可用性 Markdown")
+    reference_sources = find_reference_markdowns(extract_root)
+    if not grouped and not chart_sources and not code_sources and not reference_sources:
+        raise ValueError(
+            "未找到可合并的章节、图表、代码/数据可用性或参考文献 Markdown"
+        )
 
     output_path.mkdir(parents=True, exist_ok=True)
     outputs = []
@@ -427,6 +529,20 @@ def merge_all_sections_charts_and_code_to_markdown(
         )
         outputs.append(code_output)
 
+    reference_source_count = 0
+    reference_entry_count = 0
+    if reference_sources:
+        (
+            reference_output,
+            reference_source_count,
+            reference_entry_count,
+        ) = merge_reference_markdowns(
+            extract_root,
+            output_path / "参考文献_合并.md",
+            reference_sources,
+        )
+        outputs.append(reference_output)
+
     return (
         outputs,
         total_section_articles,
@@ -434,7 +550,25 @@ def merge_all_sections_charts_and_code_to_markdown(
         chart_count,
         code_source_count,
         code_link_count,
+        reference_source_count,
+        reference_entry_count,
     )
+
+
+def merge_all_sections_charts_and_code_to_markdown(
+    extract_root: Path,
+    output_path: Path,
+):
+    """Backward-compatible six-field wrapper for pre-v1.4.21 callers.
+
+    The reference Markdown is still generated as part of the operation, while
+    the historical return shape remains unchanged for external integrations.
+    """
+    result = merge_all_sections_charts_code_and_references_to_markdown(
+        extract_root,
+        output_path,
+    )
+    return result[:6]
 
 
 def _legacy_merge_all_sections_to_docx(extract_root: Path, output_path: Path):

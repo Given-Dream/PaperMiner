@@ -9,7 +9,7 @@
 
 当前版本：**v1.4.18** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.18/PaperMiner-v1.4.18-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)
 
-当前开发版：**v1.4.20**（新增 Windows 长路径自动规避；公开安装包仍以 Release 页面为准）
+当前开发版：**v1.4.21**（一键合并新增参考文献汇总；公开安装包仍以 Release 页面为准）
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -29,6 +29,13 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 参考文献 | 优先读取 MinerU `ref_text`，按原文顺序生成逐篇 `References/参考文献.md` |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.21 参考文献汇总
+
+- “合并同名章节、图表、代码/数据地址和参考文献”会额外生成 `MergedSections/参考文献_合并.md`。
+- 汇总按论文分组，保留每篇论文内部的条目顺序、原始编号和文本；相同文献在不同论文中出现时不会跨论文去重或改写。
+- 只纳入确实含条目的参考文献报告。`references_scan.json` 明确记录零结果、报告未生成或标记损坏时，不会把历史残留 Markdown 混入汇总。
+- 汇总标题优先读取长路径保护留下的 `.paperminer-source.json`，即使内部目录被缩短，结果中仍显示完整论文名。
 
 ## v1.4.20 Windows 长路径保护
 
@@ -297,14 +304,15 @@ output/
    └─ MergedSections/
       ├─ [章节名]_合并.md
       ├─ 图表汇总_合并.md
-      └─ 代码与数据可用性_合并.md
+      ├─ 代码与数据可用性_合并.md
+      └─ 参考文献_合并.md
 ```
 
 `Sections` 会保留论文中实际识别出的章节。不同论文结构并不总是固定为五章；若标题写法特殊、原始 Markdown 缺失或模型补充失败，请结合完整 Markdown 与实时日志人工核查。
 
 `References/参考文献.md` 保持原文顺序和编号。其首选数据源是 MinerU 的 `ref_text`，Markdown 标题和文末连续编号只作回退；程序不会通过 LLM 猜测缺失条目，也不会联网补齐书目信息。
 
-点击“合并同名章节、图表和代码/数据地址”后，同名章节按原规则分别汇总；图表读取每篇论文 `Word` 文件夹中的 Markdown；代码与数据地址只汇总实际含可信链接的 `OpenSource/代码与数据可用性.md`。图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。LLM 只核验候选链接，不保证外部资源长期有效，访问、引用或运行前仍应结合论文原文人工确认。
+点击“合并同名章节、图表、代码/数据地址和参考文献”后，同名章节按原规则分别汇总；图表读取每篇论文 `Word` 文件夹中的 Markdown；代码与数据地址只汇总实际含可信链接的 `OpenSource/代码与数据可用性.md`；参考文献读取每篇论文中确实含条目的 `References/参考文献.md`，并生成按论文分组的 `参考文献_合并.md`。参考文献保留各论文内部的原顺序和原编号，不跨论文去重或改写。图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。LLM 只核验代码/数据候选链接，不保证外部资源长期有效，访问、引用或运行前仍应结合论文原文人工确认。
 
 ## 重装与卸载
 
