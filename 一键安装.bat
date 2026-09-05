@@ -145,6 +145,13 @@ if not !errorlevel!==0 goto :install_deps
 if not !errorlevel!==0 goto :install_deps
 "%PYTHON_EXE%" -c "import importlib.metadata as m; v=tuple(int(x) for x in m.version('ttkbootstrap').split('.')[:3]); raise SystemExit(0 if (2,2,2) <= v < (3,0,0) else 1)" >nul 2>nul
 if not !errorlevel!==0 goto :install_deps
+if not exist "scripts\torch_runtime_policy.py" goto :install_deps
+"%PYTHON_EXE%" "scripts\torch_runtime_policy.py" verify-auto --quiet >nul 2>nul
+if not !errorlevel!==0 (
+    echo Existing PyTorch does not match this GPU or failed a real CUDA kernel test.
+    echo Setup will replace the incompatible wheel instead of keeping it.
+    goto :install_deps
+)
 
 echo.
 echo ========================================
@@ -294,27 +301,81 @@ if "!HAS_GPU!"=="0" (
     )
 )
 
-:: Determine best CUDA version based on driver
-:: Driver >= 560 -> cu126, >= 525 -> cu121, >= 520 -> cu118, else CPU
+:: Resolve architecture-aware wheel policy. This distinguishes Blackwell/RTX 50
+:: from older GPUs; driver-only selection can incorrectly install cu126 for sm_120.
+set "POLICY_CUDA_INDEX="
+set "POLICY_TORCH_PACKAGE_SPEC="
+set "POLICY_REASON="
+set "POLICY_BLACKWELL_PRESENT=0"
+set "POLICY_GPU_FAMILIES="
+set "POLICY_MINIMUM_DRIVER="
+set "POLICY_FORCE_CPU_REPAIR=0"
+set "POLICY_GPU_COUNT="
+set "POLICY_GPU_NAME="
+set "POLICY_DRIVER_VER="
+set "GPU_POLICY_FILE=%TEMP%\paperminer_torch_policy_%RANDOM%_%RANDOM%.txt"
+if exist "scripts\torch_runtime_policy.py" (
+    if defined NVIDIA_SMI (
+        "%PYTHON_EXE%" "scripts\torch_runtime_policy.py" select --nvidia-smi "!NVIDIA_SMI!" >"!GPU_POLICY_FILE!" 2>nul
+    ) else (
+        "%PYTHON_EXE%" "scripts\torch_runtime_policy.py" select >"!GPU_POLICY_FILE!" 2>nul
+    )
+    if !errorlevel!==0 if exist "!GPU_POLICY_FILE!" (
+        for /f "usebackq tokens=1,* delims==" %%a in ("!GPU_POLICY_FILE!") do (
+            if /i "%%a"=="GPU_COUNT" set "POLICY_GPU_COUNT=%%b"
+            if /i "%%a"=="GPU_NAME" set "POLICY_GPU_NAME=%%b"
+            if /i "%%a"=="DRIVER_VER" set "POLICY_DRIVER_VER=%%b"
+            if /i "%%a"=="BLACKWELL_PRESENT" set "POLICY_BLACKWELL_PRESENT=%%b"
+            if /i "%%a"=="GPU_FAMILIES" set "POLICY_GPU_FAMILIES=%%b"
+            if /i "%%a"=="MINIMUM_DRIVER" set "POLICY_MINIMUM_DRIVER=%%b"
+            if /i "%%a"=="CUDA_INDEX" set "POLICY_CUDA_INDEX=%%b"
+            if /i "%%a"=="TORCH_PACKAGE_SPEC" set "POLICY_TORCH_PACKAGE_SPEC=%%b"
+            if /i "%%a"=="POLICY_REASON" set "POLICY_REASON=%%b"
+        )
+    )
+)
+if exist "!GPU_POLICY_FILE!" del "!GPU_POLICY_FILE!" >nul 2>nul
+if defined POLICY_GPU_COUNT if not "!POLICY_GPU_COUNT!"=="0" (
+    set "HAS_GPU=1"
+    set "GPU_COUNT=!POLICY_GPU_COUNT!"
+    if defined POLICY_GPU_NAME set "GPU_NAME=!POLICY_GPU_NAME!"
+    if defined POLICY_DRIVER_VER set "DRIVER_VER=!POLICY_DRIVER_VER!"
+)
+
+:: Determine best CUDA version based on architecture and driver. The legacy
+:: driver-only branch is retained only if the policy helper cannot run.
 set "CUDA_INDEX="
+set "TORCH_PACKAGE_SPEC=torch torchvision torchaudio"
 if "!HAS_GPU!"=="1" (
     echo   NVIDIA CUDA environment detected: !GPU_COUNT! GPU^(s^), driver !DRIVER_VER!
     set "DRIVER_MAJOR=0"
     for /f "tokens=1 delims=." %%m in ("!DRIVER_VER!") do set /a DRIVER_MAJOR=%%m
-    if !DRIVER_MAJOR! GEQ 560 (
-        set "CUDA_INDEX=cu126"
-    ) else if !DRIVER_MAJOR! GEQ 525 (
-        set "CUDA_INDEX=cu121"
-    ) else if !DRIVER_MAJOR! GEQ 520 (
-        set "CUDA_INDEX=cu118"
+    if defined POLICY_CUDA_INDEX (
+        set "CUDA_INDEX=!POLICY_CUDA_INDEX!"
+        if defined POLICY_TORCH_PACKAGE_SPEC set "TORCH_PACKAGE_SPEC=!POLICY_TORCH_PACKAGE_SPEC!"
+        if defined POLICY_GPU_FAMILIES echo   GPU generation: !POLICY_GPU_FAMILIES!
+        echo   Architecture policy: !POLICY_REASON!
+        if defined POLICY_MINIMUM_DRIVER echo   Driver baseline for this policy: !POLICY_MINIMUM_DRIVER!
     ) else (
-        set "CUDA_INDEX=cpu"
+        if !DRIVER_MAJOR! GEQ 561 (
+            set "CUDA_INDEX=cu126"
+        ) else if !DRIVER_MAJOR! GEQ 532 (
+            set "CUDA_INDEX=cu121"
+        ) else if !DRIVER_MAJOR! GEQ 521 (
+            set "CUDA_INDEX=cu118"
+        ) else (
+            set "CUDA_INDEX=cpu"
+        )
     )
     if "!CUDA_INDEX!"=="cpu" (
-        echo   Driver version too old for CUDA PyTorch, will use CPU version.
+        if defined POLICY_GPU_COUNT if not "!POLICY_GPU_COUNT!"=="0" set "POLICY_FORCE_CPU_REPAIR=1"
+        echo   [NOTICE] Driver/GPU combination cannot use a supported CUDA wheel.
+        echo   Setup will replace any incompatible CUDA PyTorch build with the CPU build.
+        if defined POLICY_MINIMUM_DRIVER echo   Update the NVIDIA driver to !POLICY_MINIMUM_DRIVER! or newer, then run Repair to enable GPU.
         set "HAS_GPU=0"
     ) else (
         echo   Selected PyTorch CUDA version: !CUDA_INDEX!
+        if "!POLICY_BLACKWELL_PRESENT!"=="1" echo   Blackwell/RTX 50 compatibility mode is active.
         echo   Standalone CUDA Toolkit and cuDNN are not required for this binary installation.
         echo   The official PyTorch wheel supplies the matching CUDA user-mode runtime and cuDNN.
     )
@@ -338,19 +399,59 @@ set "TORCH_OK=0"
 "%PYTHON_EXE%" -m pip show torch >nul 2>nul
 if !errorlevel!==0 (
     if "!HAS_GPU!"=="1" (
-        :: GPU present: check if installed torch has CUDA support
-        "%PYTHON_EXE%" -c "import torch;exit(0 if torch.cuda.is_available() else 1)" 2>nul
-        if !errorlevel!==0 (
-            set "TORCH_OK=1"
-            echo   PyTorch with CUDA already installed and working, skipping.
+        :: A CUDA-visible device is not enough. Verify the wheel family and run
+        :: float32/float16 kernels on every device before keeping this install.
+        set "EXISTING_TORCH_VERIFY_FILE=%TEMP%\paperminer_existing_torch_%RANDOM%_%RANDOM%.txt"
+        if exist "scripts\torch_runtime_policy.py" (
+            "%PYTHON_EXE%" "scripts\torch_runtime_policy.py" verify --expected "!CUDA_INDEX!" >"!EXISTING_TORCH_VERIFY_FILE!" 2>&1
         ) else (
-            echo   PyTorch installed but CUDA not available - will reinstall.
-            %PIP_CMD% uninstall torch torchvision torchaudio -y >nul 2>nul
+            "%PYTHON_EXE%" -c "import torch; assert torch.cuda.is_available(); [(torch.arange(1,17,device=f'cuda:{i}').to(torch.float16).mul(2).sum().item(),torch.cuda.synchronize(i)) for i in range(torch.cuda.device_count())]" >"!EXISTING_TORCH_VERIFY_FILE!" 2>&1
         )
+        set "EXISTING_TORCH_VERIFY_EXIT=!errorlevel!"
+        if "!EXISTING_TORCH_VERIFY_EXIT!"=="0" (
+            set "TORCH_OK=1"
+            echo   PyTorch wheel matches !CUDA_INDEX! and real CUDA kernels passed; skipping.
+        ) else (
+            echo   Existing PyTorch is incompatible with the detected GPU policy.
+            if exist "!EXISTING_TORCH_VERIFY_FILE!" type "!EXISTING_TORCH_VERIFY_FILE!"
+            echo   Removing the incompatible wheel before installing !CUDA_INDEX!...
+            %PIP_CMD% uninstall torch torchvision torchaudio -y
+            if errorlevel 1 (
+                echo   [ERROR] Failed to remove the incompatible PyTorch packages.
+                goto :failed
+            )
+        )
+        if exist "!EXISTING_TORCH_VERIFY_FILE!" del "!EXISTING_TORCH_VERIFY_FILE!" >nul 2>nul
     ) else (
-        :: No GPU: any torch is fine
-        set "TORCH_OK=1"
-        echo   PyTorch already installed, skipping.
+        if "!POLICY_FORCE_CPU_REPAIR!"=="1" (
+            :: A supported GPU was found, but its current driver cannot safely
+            :: run the required wheel. Do not retain an incompatible CUDA build.
+            set "CPU_TORCH_VERIFY_FILE=%TEMP%\paperminer_cpu_torch_%RANDOM%_%RANDOM%.txt"
+            if exist "scripts\torch_runtime_policy.py" (
+                "%PYTHON_EXE%" "scripts\torch_runtime_policy.py" verify --expected cpu --require-cpu-wheel >"!CPU_TORCH_VERIFY_FILE!" 2>&1
+            ) else (
+                "%PYTHON_EXE%" -c "import torch; raise SystemExit(0 if torch.version.cuda is None else 1)" >"!CPU_TORCH_VERIFY_FILE!" 2>&1
+            )
+            set "CPU_TORCH_VERIFY_EXIT=!errorlevel!"
+            if "!CPU_TORCH_VERIFY_EXIT!"=="0" (
+                set "TORCH_OK=1"
+                echo   Compatible CPU PyTorch already installed, skipping.
+            ) else (
+                echo   Existing CUDA PyTorch is incompatible with the current GPU/driver policy.
+                if exist "!CPU_TORCH_VERIFY_FILE!" type "!CPU_TORCH_VERIFY_FILE!"
+                echo   Removing it before installing the safe CPU build...
+                %PIP_CMD% uninstall torch torchvision torchaudio -y
+                if errorlevel 1 (
+                    echo   [ERROR] Failed to remove the incompatible PyTorch packages.
+                    goto :failed
+                )
+            )
+            if exist "!CPU_TORCH_VERIFY_FILE!" del "!CPU_TORCH_VERIFY_FILE!" >nul 2>nul
+        ) else (
+            :: No NVIDIA GPU: any working torch wheel remains usable on CPU.
+            set "TORCH_OK=1"
+            echo   PyTorch already installed, skipping.
+        )
     )
 )
 
@@ -372,27 +473,40 @@ if "!HAS_GPU!"=="1" (
     echo.
     echo   Installing CUDA version of PyTorch [!CUDA_INDEX!]...
     echo   NOTE: Must download from official PyTorch source (~2.5GB^)
+    echo   Package set: !TORCH_PACKAGE_SPEC!
     echo.
-    %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/!CUDA_INDEX! --timeout 90 --retries 5 --prefer-binary
+    %PIP_CMD% install --upgrade !TORCH_PACKAGE_SPEC! --index-url https://download.pytorch.org/whl/!CUDA_INDEX! --timeout 300 --retries 10 --prefer-binary
 
-    :: Verify CUDA actually works after installation
+    :: Verify the installed wheel family and execute real float16 kernels.
     echo.
-    echo   Verifying PyTorch CUDA support...
+    echo   Verifying PyTorch CUDA runtime and real kernels...
     set "GPU_VERIFY_FILE=%TEMP%\paperminer_gpu_verify_%RANDOM%_%RANDOM%.txt"
-    "%PYTHON_EXE%" -c "import torch;ok=torch.cuda.is_available();print('PyTorch: '+torch.__version__);print('CUDA runtime: '+str(torch.version.cuda));print('cuDNN: '+str(torch.backends.cudnn.version()));print('CUDA devices: '+str(torch.cuda.device_count()));[print(f'GPU {i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())];raise SystemExit(0 if ok else 1)" >"!GPU_VERIFY_FILE!" 2>&1
+    if exist "scripts\torch_runtime_policy.py" (
+        "%PYTHON_EXE%" "scripts\torch_runtime_policy.py" verify --expected "!CUDA_INDEX!" >"!GPU_VERIFY_FILE!" 2>&1
+    ) else (
+        "%PYTHON_EXE%" -c "import torch; assert torch.cuda.is_available(); print('PyTorch: '+torch.__version__); print('CUDA runtime: '+str(torch.version.cuda)); print('cuDNN: '+str(torch.backends.cudnn.version())); [(torch.arange(1,17,device=f'cuda:{i}').to(torch.float16).mul(2).sum().item(),torch.cuda.synchronize(i)) for i in range(torch.cuda.device_count())]" >"!GPU_VERIFY_FILE!" 2>&1
+    )
     set "CUDA_VERIFY_EXIT=!errorlevel!"
     if exist "!GPU_VERIFY_FILE!" type "!GPU_VERIFY_FILE!"
     if exist "!GPU_VERIFY_FILE!" del "!GPU_VERIFY_FILE!" >nul 2>nul
     if "!CUDA_VERIFY_EXIT!"=="0" (
-        echo   PyTorch CUDA verification passed!
+        echo   PyTorch CUDA runtime and kernel verification passed!
     ) else (
         echo.
         echo   [WARNING] CUDA verification failed!
-        echo   Your GPU driver (v!DRIVER_VER!^) may not fully support !CUDA_INDEX!.
+        echo   The installed wheel or GPU driver (v!DRIVER_VER!^) did not pass !CUDA_INDEX! validation.
+        if "!POLICY_BLACKWELL_PRESENT!"=="1" (
+            echo   [ERROR] Blackwell/RTX 50 requires a verified CUDA wheel.
+            echo   Setup will not silently report success with an incompatible GPU runtime.
+            echo   Update the NVIDIA driver if requested, then run Setup again.
+            goto :failed
+        )
         echo   Falling back to CPU version...
         echo.
-        %PIP_CMD% uninstall torch torchvision torchaudio -y >nul 2>nul
-        %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 90 --retries 5 --prefer-binary
+        %PIP_CMD% uninstall torch torchvision torchaudio -y
+        if errorlevel 1 goto :failed
+        %PIP_CMD% install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 300 --retries 10 --prefer-binary
+        if errorlevel 1 goto :failed
         echo.
         echo   CPU version installed. PDF processing will still work,
         echo   but will be slower without GPU acceleration.
@@ -401,7 +515,8 @@ if "!HAS_GPU!"=="1" (
     echo.
     echo   Installing CPU version of PyTorch...
     echo.
-    %PIP_CMD% install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 90 --retries 5 --prefer-binary
+    %PIP_CMD% install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --timeout 300 --retries 10 --prefer-binary
+    if errorlevel 1 goto :failed
 )
 
 :: ----------------------------------------

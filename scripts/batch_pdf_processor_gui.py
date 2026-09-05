@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.21"
+    __version__ = "1.4.22"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -764,15 +764,26 @@ class BatchPDFProcessorGUI:
             probe = (
                 "import json, torch\n"
                 "items = []\n"
+                "errors = []\n"
                 "available = bool(torch.cuda.is_available())\n"
                 "count = int(torch.cuda.device_count()) if available else 0\n"
                 "for index in range(count):\n"
                 "    props = torch.cuda.get_device_properties(index)\n"
-                "    items.append({'index': index, 'name': props.name, "
-                "'memory_gb': round(props.total_memory / (1024 ** 3), 1)})\n"
+                "    try:\n"
+                "        values = torch.arange(1, 17, dtype=torch.float32, device=f'cuda:{index}')\n"
+                "        check = float((values.to(torch.float16) * 2).float().sum().item())\n"
+                "        torch.cuda.synchronize(index)\n"
+                "        if abs(check - 272.0) > 0.5:\n"
+                "            raise RuntimeError(f'unexpected CUDA result: {check}')\n"
+                "        items.append({'index': index, 'name': props.name, "
+                "'memory_gb': round(props.total_memory / (1024 ** 3), 1), "
+                "'capability': list(torch.cuda.get_device_capability(index))})\n"
+                "    except Exception as exc:\n"
+                "        errors.append(f'GPU {index} {props.name}: {type(exc).__name__}: {exc}')\n"
                 "print('__PAPERMINER_GPU_JSON__' + json.dumps({"
                 "'torch_version': torch.__version__, 'cuda_available': available, "
-                "'gpus': items}, ensure_ascii=False))\n"
+                "'cuda_runtime': torch.version.cuda, 'architectures': torch.cuda.get_arch_list(), "
+                "'gpus': items, 'errors': errors}, ensure_ascii=False))\n"
             )
             creation_flags = 0
             if sys.platform == "win32":
@@ -812,15 +823,27 @@ class BatchPDFProcessorGUI:
                                 "index": int(item["index"]),
                                 "name": str(item["name"]),
                                 "memory_gb": float(item["memory_gb"]),
+                                "capability": tuple(item.get("capability", ())),
                             }
                         )
                     except (KeyError, TypeError, ValueError):
                         continue
                 self.detected_gpus = detected
                 self._detected_torch_version = str(payload.get("torch_version", "未知"))
-                self._gpu_detection_error = (
-                    "" if detected else "PyTorch 未检测到可用的 CUDA 显卡"
-                )
+                self._detected_cuda_runtime = str(payload.get("cuda_runtime") or "无")
+                kernel_errors = [
+                    str(item) for item in payload.get("errors", []) if item
+                ]
+                if detected:
+                    self._gpu_detection_error = ""
+                elif kernel_errors:
+                    self._gpu_detection_error = (
+                        "PyTorch 能识别显卡，但真实 CUDA 内核测试失败："
+                        + "；".join(kernel_errors)
+                        + "。请运行 Setup 的‘重装’以匹配显卡代际和 CUDA wheel。"
+                    )
+                else:
+                    self._gpu_detection_error = "PyTorch 未检测到可用的 CUDA 显卡"
             except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
                 self.detected_gpus = []
                 self._gpu_detection_error = str(exc)
@@ -4960,6 +4983,21 @@ class BatchPDFProcessorGUI:
                     "国内用户请确认环境变量: set MINERU_MODEL_SOURCE=modelscope （运行程序.bat 已自动设置）",
                     "也可手动下载: conda activate MinerU && mineru-models-download --source modelscope --model_type pipeline",
                     "检查代理/防火墙设置，确保当前环境可访问模型源",
+                ],
+            }
+
+        if (
+            "no kernel image is available" in text
+            or "does not include kernels for this gpu" in text
+            or "not compatible with the current pytorch installation" in text
+        ):
+            return {
+                "code": "torch_cuda_arch_mismatch",
+                "title": "PyTorch CUDA wheel 与显卡架构不匹配",
+                "tips": [
+                    "关闭 PaperMiner，运行 Setup 的‘重装’；安装器会识别 RTX 30/40/50 和计算能力",
+                    "Setup 会先卸载不兼容的 torch/torchvision/torchaudio，再安装目标 wheel 并逐卡实测",
+                    "RTX 50 / Blackwell 建议使用 Windows 驱动 580.88 及更新版本与 cu130；更新后再次重装",
                 ],
             }
 

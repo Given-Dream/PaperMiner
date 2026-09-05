@@ -9,7 +9,7 @@
 
 当前版本：**v1.4.18** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.18/PaperMiner-v1.4.18-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)
 
-当前开发版：**v1.4.21**（一键合并新增参考文献汇总；公开安装包仍以 Release 页面为准）
+当前开发版：**v1.4.22**（修复 RTX 30/40/50 系 PyTorch CUDA wheel 匹配与自修复；公开安装包仍以 Release 页面为准）
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -29,6 +29,14 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 参考文献 | 优先读取 MinerU `ref_text`，按原文顺序生成逐篇 `References/参考文献.md` |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.22 RTX 30/40/50 CUDA 自检与修复
+
+- Setup 同时读取显卡型号、计算能力和 NVIDIA 驱动，不再仅凭驱动号推断 wheel。RTX 30/Ampere、RTX 40/Ada 默认选择兼容性较广的 `cu126`，旧驱动再按安全线降到 `cu121` 或 `cu118`；RTX 50/Blackwell 在 Windows 驱动 580.88+ 使用 `cu130`。
+- 对仍处于 570.65–580.87 的 RTX 50，使用官方仍提供的固定 PyTorch 2.11.0 `cu128` 组合；更旧驱动会明确提示升级，并暂时安装 CPU wheel。
+- 已安装版本不会仅因 `torch.cuda.is_available()` 为真而跳过。Setup 会核对 CUDA runtime，并在每张 GPU 上执行 FP32→FP16 计算和同步；`no kernel image`、运行时过旧或任意一张卡失败都会触发卸载旧三件套并重装。
+- 混合多卡按要求最高的一张选择统一 wheel。例如 RTX 4090 + RTX 5060 会按 RTX 50 的 `cu130` 策略安装，再逐卡验证。
+- PyTorch wheel 已携带其所需 CUDA 用户态运行库和 cuDNN；一般无需另外安装完整 CUDA Toolkit。系统 NVIDIA 驱动仍需满足目标 wheel 的最低要求。
 
 ## v1.4.21 参考文献汇总
 

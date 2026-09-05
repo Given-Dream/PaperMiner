@@ -103,6 +103,17 @@ class MinerUPathPolicyTests(unittest.TestCase):
         )
         self.assertEqual(diagnosis["code"], "mineru_windows_path_too_long")
 
+    def test_unsupported_gpu_kernel_gets_repair_diagnosis(self):
+        diagnosis = BatchPDFProcessorGUI.diagnose_mineru_output(
+            None,
+            [
+                "torch.AcceleratorError: CUDA error: no kernel image is "
+                "available for execution on the device"
+            ],
+        )
+        self.assertEqual(diagnosis["code"], "torch_cuda_arch_mismatch")
+        self.assertIn("重装", " ".join(diagnosis["tips"]))
+
     def test_text_extraction_uses_short_filename_but_keeps_full_title_folder(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

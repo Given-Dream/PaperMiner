@@ -1,4 +1,4 @@
-# PaperMiner 1.4.21 软件版
+# PaperMiner 1.4.22 软件版
 
 ## 发布与安装
 
@@ -18,7 +18,9 @@ Conda 主程序和 `MinerU` 环境可以位于不同磁盘。Setup 优先复用�
 
 安装 MinerU 前会并行测试清华、阿里云、中科大、腾讯和 PyPI 官方索引的短 wheel 样本，只使用测速最快的单一索引；镜像缺包或未同步时重试官方 PyPI。PyTorch CUDA 主 wheel 仍来自 PyTorch 官方仓库，普通依赖可以从测速选出的 PyPI 源获取。
 
-GPU 阶段会列出每张 NVIDIA 显卡的型号、显存和驱动版本。二进制 PyTorch wheel 已包含所需 CUDA 用户态运行库和 cuDNN，Setup 不安装完整 CUDA Toolkit，也不静默修改系统显卡驱动。驱动缺失或版本过旧时先安装 CPU 版并显示 NVIDIA 官方驱动地址；驱动就绪后运行“重装”即可切换。安装后日志显示 PyTorch、CUDA runtime、cuDNN 和全部可用 GPU，并以 `torch.cuda.is_available()` 作为最终判定。
+GPU 阶段会列出每张 NVIDIA 显卡的型号、计算能力、代际、显存和驱动版本。RTX 30/40 根据驱动选择 `cu126/cu121/cu118`；RTX 50 / Blackwell 在 Windows 驱动 580.88+ 使用 `cu130`，570.65–580.87 使用固定的 PyTorch 2.11.0 `cu128` 兼容组合。二进制 PyTorch wheel 已包含所需 CUDA 用户态运行库和 cuDNN，Setup 不安装完整 CUDA Toolkit，也不静默修改系统显卡驱动。
+
+Setup 会在保留现有 PyTorch 前以及安装完成后，逐卡执行真实 FP32→FP16 CUDA 运算与同步。运行时不符、缺少当前 GPU kernel image 或任意显卡实测失败时，会把现有版本、目标方案和失败原因写入日志，卸载旧 `torch/torchvision/torchaudio` 后重装匹配组合。驱动低于安全线时改装 CPU wheel并提示最低驱动版本；更新驱动后运行“重装”即可切回 GPU。
 
 ## 正常运行
 

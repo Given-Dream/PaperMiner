@@ -11,8 +11,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyDescription("PaperMiner direct GUI launcher without PowerShell")]
 [assembly: AssemblyCompany("PaperMiner Recovery")]
 [assembly: AssemblyProduct("PaperMiner")]
-[assembly: AssemblyVersion("1.4.21.0")]
-[assembly: AssemblyFileVersion("1.4.21.0")]
+[assembly: AssemblyVersion("1.4.22.0")]
+[assembly: AssemblyFileVersion("1.4.22.0")]
 
 internal static class PaperMinerLauncher
 {

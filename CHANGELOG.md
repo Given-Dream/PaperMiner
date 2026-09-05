@@ -1,5 +1,15 @@
 # PaperMiner 更新日志
 
+## v1.4.22 (开发版)
+
+- PyTorch 安装策略从“只按驱动版本”升级为“GPU 代际/计算能力 + 驱动 + 真实 CUDA 内核”三重核验，明确区分 RTX 30（Ampere）、RTX 40（Ada）和 RTX 50（Blackwell）。
+- RTX 50 / Blackwell 在 Windows 驱动 580.88 及更新版本上使用 `cu130`；570.65–580.87 的兼容区间使用固定的 PyTorch 2.11.0 `cu128` 组合。RTX 30/40 根据驱动使用 `cu126`、`cu121` 或 `cu118`。
+- 多卡混合配置按要求最高的显卡选择统一 wheel；安装前后均在每张可见 GPU 上执行 FP32→FP16 张量运算及同步，不再把 `torch.cuda.is_available()` 当作充分条件。
+- 已安装 wheel 与目标运行时不符、缺少当前 GPU kernel image 或真实运算失败时，Setup 会输出显卡代际、驱动、现有 PyTorch/CUDA 和目标方案，卸载旧 `torch/torchvision/torchaudio` 后重装匹配组合。
+- 显卡存在但驱动低于最低安全线时，不再保留不可执行的 CUDA wheel；Setup 会说明所需驱动版本并换成 CPU wheel，更新驱动后可运行“重装”切回 GPU。
+
+---
+
 ## v1.4.21 (开发版)
 
 - 主界面的合并入口扩展为“合并同名章节、图表、代码/数据地址和参考文献”。
