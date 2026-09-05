@@ -7,9 +7,9 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前版本：**v1.4.18** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.18/PaperMiner-v1.4.18-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)
+当前版本：**v1.4.22** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.22/PaperMiner-v1.4.22-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.22)
 
-当前开发版：**v1.4.22**（修复 RTX 30/40/50 系 PyTorch CUDA wheel 匹配与自修复；公开安装包仍以 Release 页面为准）
+当前源码与公开安装包均为 **v1.4.22**，包含 RTX 30/40/50 系 PyTorch CUDA wheel 匹配、自检与自动修复。
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -216,8 +216,8 @@ Setup 中分别指定：
 
 ### 2. 下载并运行 Setup
 
-1. 打开 [v1.4.18 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)。
-2. 下载 `PaperMiner-v1.4.18-Setup.exe`，并使用同页的 `SHA256SUMS.txt` 校验完整性。
+1. 打开 [v1.4.22 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.22)。
+2. 下载 `PaperMiner-v1.4.22-Setup.exe`，并使用同页的 `SHA256SUMS.txt` 校验完整性。
 3. 双击安装包。Setup 先快速检查明确路径和已保存配置；未找到时，可直接勾选“我确认本机没有 Conda”，也可先使用“检测此目录”或“全盘检索 Conda”进行额外核查。PaperMiner 默认目录为：
 
    ```text
