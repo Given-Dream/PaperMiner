@@ -60,6 +60,7 @@ def completion_options_signature(options: dict | None) -> str:
         "extract_tables",
         "extract_sections",
         "extract_open_source",
+        "extract_references",
         "backend",
         "llm_model",
         "llm_provider",

@@ -9,6 +9,8 @@
 
 当前版本：**v1.4.18** · [直接下载 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.18/PaperMiner-v1.4.18-Setup.exe) · [查看 Release 说明](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.18)
 
+当前开发版：**v1.4.19**（新增文末参考文献 Markdown 提取；公开安装包仍以 Release 页面为准）
+
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
 ## 适合做什么
@@ -24,8 +26,17 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 章节归类 | `Abstract`、`Introduction`、`Methods`、`Results & Discussion`、`Conclusion` 等独立 Markdown |
 | 图表汇总 | 按原文顺序生成 Word 与 Markdown |
 | 代码与数据可用性 | 提取文末代码仓库和数据集超链接；只有可信地址才生成可核验 Markdown |
+| 参考文献 | 优先读取 MinerU `ref_text`，按原文顺序生成逐篇 `References/参考文献.md` |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.19 参考文献提取
+
+- 主界面新增“文末参考文献（Markdown）”，默认启用，可独立于正文和章节提取运行。
+- 第一优先级读取 MinerU `*_content_list.json` 中明确标注为 `ref_text` 的结构化条目，保留跨页顺序、原始编号和书目信息。
+- `ref_text` 缺失时，使用 Markdown 的 `References`、`Bibliography`、`参考文献`等标题确定边界；标题也缺失时，仅接受文末至少 5 条、编号大体连续且具备年份/期刊/DOI 等书目信号的序列。
+- 参考文献属于结构化复制任务，不让 LLM 重新生成或润色，避免改变作者、年份、题名、页码和 DOI。输出仅做空白与断行归一化，正式引用前仍需与原 PDF 核对。
+- 有结果时生成 `References/参考文献.md`；每次扫描同时写入 `References/references_scan.json`，使“跳过已有结果”和闪退恢复能判断该选项是否已完成。
 
 ## v1.4.18 半成品生命周期
 
@@ -272,6 +283,9 @@ output/
    │  ├─ OpenSource/
    │  │  ├─ availability_scan.json
    │  │  └─ 代码与数据可用性.md  # 仅在有可信地址时生成
+   │  ├─ References/
+   │  │  ├─ references_scan.json
+   │  │  └─ 参考文献.md          # 识别到可信条目时生成
    │  └─ Word/
    └─ MergedSections/
       ├─ [章节名]_合并.md
@@ -280,6 +294,8 @@ output/
 ```
 
 `Sections` 会保留论文中实际识别出的章节。不同论文结构并不总是固定为五章；若标题写法特殊、原始 Markdown 缺失或模型补充失败，请结合完整 Markdown 与实时日志人工核查。
+
+`References/参考文献.md` 保持原文顺序和编号。其首选数据源是 MinerU 的 `ref_text`，Markdown 标题和文末连续编号只作回退；程序不会通过 LLM 猜测缺失条目，也不会联网补齐书目信息。
 
 点击“合并同名章节、图表和代码/数据地址”后，同名章节按原规则分别汇总；图表读取每篇论文 `Word` 文件夹中的 Markdown；代码与数据地址只汇总实际含可信链接的 `OpenSource/代码与数据可用性.md`。图表汇总会自动调整相对图片路径，因此应与各论文的 `Figure`、`Tables` 文件夹一起保留。LLM 只核验候选链接，不保证外部资源长期有效，访问、引用或运行前仍应结合论文原文人工确认。
 

@@ -1,5 +1,15 @@
 # PaperMiner 更新日志
 
+## v1.4.19 (开发版)
+
+- 新增“文末参考文献（Markdown）”提取项，每篇论文输出到 `References/参考文献.md`。
+- 优先使用 MinerU `*_content_list.json` 的 `ref_text` 结构化条目，保留跨页顺序、原始编号以及不同编号下的重复引用。
+- `ref_text` 缺失时，按 `References` / `Bibliography` / `参考文献` 标题边界解析；标题缺失时仅接受文末编号连续、书目信号充分的保守兜底结果。
+- 参考文献不经过 LLM 生成或改写，避免作者、年份、题名、页码和 DOI 失真；只归一化 OCR 断行与多余空白。
+- 新增 `References/references_scan.json` 完成标记，并将该选项纳入完成签名、跳过判断及闪退恢复配置。
+
+---
+
 ## v1.4.18 (2026-08-30)
 
 - 调整中断半成品生命周期：批次暂停或异常中断时继续保留 `Recovery\Interrupted`，以便重启恢复和人工核查。

@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.18"
+    __version__ = "1.4.19"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -98,6 +98,14 @@ try:
         write_availability_report,
         write_availability_scan_marker,
     )
+    from reference_extractor import (
+        REFERENCE_REPORT_FILENAME,
+        REFERENCE_SCAN_FILENAME,
+        extract_references,
+        reference_scan_completed,
+        write_reference_report,
+        write_reference_scan_marker,
+    )
 except ImportError:
     from scripts.section_merger import (
         merge_all_sections_charts_and_code_to_markdown as merge_sections_charts_and_code_files,
@@ -109,6 +117,14 @@ except ImportError:
         extract_availability_links,
         write_availability_report,
         write_availability_scan_marker,
+    )
+    from scripts.reference_extractor import (
+        REFERENCE_REPORT_FILENAME,
+        REFERENCE_SCAN_FILENAME,
+        extract_references,
+        reference_scan_completed,
+        write_reference_report,
+        write_reference_scan_marker,
     )
 
 try:
@@ -1482,6 +1498,7 @@ class BatchPDFProcessorGUI:
             "extract_tables": bool(self.extract_tables_var.get()),
             "extract_sections": bool(self.extract_sections_var.get()),
             "extract_open_source": bool(self.extract_open_source_var.get()),
+            "extract_references": bool(self.extract_references_var.get()),
             "use_gpu": use_gpu,
             "gpu_assignments": gpu_assignments,
             "skip_processed": bool(self.skip_processed_var.get()),
@@ -1695,9 +1712,14 @@ class BatchPDFProcessorGUI:
             "extract_tables": self.extract_tables_var,
             "extract_sections": self.extract_sections_var,
             "extract_open_source": self.extract_open_source_var,
+            "extract_references": self.extract_references_var,
             "use_gpu": self.use_gpu_var,
             "skip_processed": self.skip_processed_var,
         }
+        # Runs created before v1.4.19 never requested reference extraction.
+        # Keep their recovery semantics stable instead of silently adding work.
+        if "extract_references" not in options:
+            self.extract_references_var.set(False)
         for key, variable in option_variables.items():
             if key in options:
                 variable.set(bool(options[key]))
@@ -2461,6 +2483,7 @@ class BatchPDFProcessorGUI:
         self.extract_tables_var = tk.BooleanVar(value=True)
         self.extract_sections_var = tk.BooleanVar(value=True)
         self.extract_open_source_var = tk.BooleanVar(value=True)
+        self.extract_references_var = tk.BooleanVar(value=True)
         self.use_gpu_var = tk.BooleanVar(value=True)
         self.skip_processed_var = tk.BooleanVar(value=True)
 
@@ -2491,12 +2514,22 @@ class BatchPDFProcessorGUI:
         )
         self.extract_open_source_check.grid(row=7, column=1, sticky=tk.W, pady=2)
 
+        self.extract_references_check = self.create_styled_checkbutton(
+            options_frame,
+            '文末参考文献（Markdown）',
+            self.extract_references_var,
+            bootstyle='warning',
+        )
+        self.extract_references_check.grid(
+            row=8, column=0, columnspan=2, sticky=tk.W, pady=2
+        )
+
         ttk.Separator(options_frame, orient='horizontal', bootstyle='secondary').grid(
-            row=8, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=8
+            row=9, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=8
         )
 
         llm_frame = ttk.Frame(options_frame)
-        llm_frame.grid(row=9, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        llm_frame.grid(row=10, column=0, columnspan=2, sticky=(tk.W, tk.E))
         llm_frame.grid_columnconfigure(1, weight=1)
         ttk.Label(llm_frame, text='LLM 模型').grid(
             row=0, column=0, sticky=tk.W, padx=(0, 8)
@@ -2525,7 +2558,7 @@ class BatchPDFProcessorGUI:
 
         backend_frame = ttk.Frame(options_frame)
         backend_frame.grid(
-            row=10, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(9, 0)
+            row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(9, 0)
         )
         backend_frame.grid_columnconfigure(1, weight=1)
         ttk.Label(backend_frame, text='MinerU 后端').grid(
@@ -2548,7 +2581,7 @@ class BatchPDFProcessorGUI:
 
         toggle_frame = ttk.Frame(options_frame)
         toggle_frame.grid(
-            row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0)
+            row=12, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0)
         )
         toggle_frame.grid_columnconfigure(0, weight=1)
         toggle_frame.grid_columnconfigure(1, weight=1)
@@ -2947,6 +2980,7 @@ class BatchPDFProcessorGUI:
         self.extract_tables_var = tk.BooleanVar(value=True)
         self.extract_sections_var = tk.BooleanVar(value=True)  # 默认勾选
         self.extract_open_source_var = tk.BooleanVar(value=True)
+        self.extract_references_var = tk.BooleanVar(value=True)
         self.use_gpu_var = tk.BooleanVar(value=True)
         self.skip_processed_var = tk.BooleanVar(value=True)
 
@@ -2988,9 +3022,16 @@ class BatchPDFProcessorGUI:
         )
         self.extract_open_source_check.grid(row=6, column=1, sticky=tk.W, pady=4)
 
+        self.extract_references_check = self.create_styled_checkbutton(
+            options_frame,
+            "提取文末参考文献（Markdown）",
+            self.extract_references_var,
+        )
+        self.extract_references_check.grid(row=7, column=0, sticky=tk.W, pady=4)
+
         # 当前 LLM 接口及模型。自定义接口在设置中普通单击选择一个模型。
         llm_frame = ttk.Frame(options_frame)
-        llm_frame.grid(row=7, column=0, sticky=tk.W, padx=(30, 0), pady=(5, 2))
+        llm_frame.grid(row=8, column=0, sticky=tk.W, padx=(30, 0), pady=(5, 2))
 
         ttk.Label(llm_frame, text="🤖 LLM 模型:").pack(side=tk.LEFT, padx=(0, 5))
 
@@ -3017,12 +3058,12 @@ class BatchPDFProcessorGUI:
         self.llm_provider_label.pack(side=tk.LEFT)
 
         ttk.Separator(options_frame, orient='horizontal').grid(
-            row=8, column=0, sticky=(tk.W, tk.E), pady=10
+            row=9, column=0, sticky=(tk.W, tk.E), pady=10
         )
 
         # MinerU 后端选择
         backend_frame = ttk.Frame(options_frame)
-        backend_frame.grid(row=9, column=0, sticky=tk.W, pady=4)
+        backend_frame.grid(row=10, column=0, sticky=tk.W, pady=4)
 
         ttk.Label(
             backend_frame,
@@ -3052,10 +3093,10 @@ class BatchPDFProcessorGUI:
             "⚡ 使用 GPU 加速 (推荐)",
             self.use_gpu_var
         )
-        self.gpu_checkbox.grid(row=10, column=0, sticky=tk.W, pady=4)
+        self.gpu_checkbox.grid(row=11, column=0, sticky=tk.W, pady=4)
 
         legacy_gpu_settings = ttk.Frame(options_frame)
-        legacy_gpu_settings.grid(row=11, column=0, sticky=(tk.W, tk.E), pady=(2, 4))
+        legacy_gpu_settings.grid(row=12, column=0, sticky=(tk.W, tk.E), pady=(2, 4))
         self.gpu_settings_button = ttk.Button(
             legacy_gpu_settings,
             text="GPU 并行设置",
@@ -3071,7 +3112,7 @@ class BatchPDFProcessorGUI:
         self.gpu_summary_label.pack(side=tk.LEFT)
 
         ttk.Separator(options_frame, orient='horizontal').grid(
-            row=12, column=0, sticky=(tk.W, tk.E), pady=10
+            row=13, column=0, sticky=(tk.W, tk.E), pady=10
         )
 
         self.skip_checkbox = self.create_styled_checkbutton(
@@ -3079,7 +3120,7 @@ class BatchPDFProcessorGUI:
             "跳过已处理的文件 (extract 中已有结果)",
             self.skip_processed_var
         )
-        self.skip_checkbox.grid(row=13, column=0, sticky=tk.W, pady=4)
+        self.skip_checkbox.grid(row=14, column=0, sticky=tk.W, pady=4)
 
         # 控制按钮区域：开始：停止 = 2 : 1，体现主次（停止 90% 时间 disabled）
         control_frame = ttk.Frame(main_frame)
@@ -3521,6 +3562,9 @@ class BatchPDFProcessorGUI:
         if self._run_option("extract_open_source", False):
             if not availability_scan_completed(extract_dir):
                 return False
+        if self._run_option("extract_references", False):
+            if not reference_scan_completed(extract_dir):
+                return False
         try:
             for item in extract_dir.rglob('*'):
                 if item.is_file():
@@ -3605,6 +3649,7 @@ class BatchPDFProcessorGUI:
             self.extract_tables_var.get(),
             self.extract_sections_var.get(),
             self.extract_open_source_var.get(),
+            self.extract_references_var.get(),
         ]):
             messagebox.showwarning(
                 "未选择提取项",
@@ -3640,6 +3685,8 @@ class BatchPDFProcessorGUI:
                 extract_items.append("论文章节")
             if self.extract_open_source_var.get():
                 extract_items.append("代码与数据可用性")
+            if self.extract_references_var.get():
+                extract_items.append("参考文献")
 
             extract_desc = "、".join(extract_items)
             if self._run_option("use_gpu", True):
@@ -3724,6 +3771,8 @@ class BatchPDFProcessorGUI:
                 extract_items.append("论文章节")
             if self.extract_open_source_var.get():
                 extract_items.append("代码与数据可用性")
+            if self.extract_references_var.get():
+                extract_items.append("参考文献")
 
             extract_desc = "、".join(extract_items)
 
@@ -4988,6 +5037,15 @@ class BatchPDFProcessorGUI:
                 ):
                     any_success = True
 
+            # 参考文献优先读取 MinerU 的 ref_text 结构，Markdown 仅作兜底。
+            if self._run_option("extract_references", True):
+                if self.extract_reference_list(
+                    raw_pdf_dir,
+                    extract_pdf_dir,
+                    actual_pdf_name,
+                ):
+                    any_success = True
+
             # 先创建 Word 文件夹（不依赖 LLM），避免 LLM 长耗时或失败时丢失 Word/docx 产出
             if self._run_option("extract_figures", True) or self._run_option("extract_tables", True):
                 self.create_word_folder(raw_pdf_dir, extract_pdf_dir, actual_pdf_name)
@@ -5737,6 +5795,59 @@ class BatchPDFProcessorGUI:
             return True
         except Exception as exc:
             self.log(f"    ❌ 代码/数据可用性提取失败: {exc}")
+            self.log(traceback.format_exc())
+            return False
+
+    def extract_reference_list(
+        self,
+        raw_dir: Path,
+        extract_dir: Path,
+        pdf_name: str,
+    ) -> bool:
+        """提取文末参考文献并保存为逐篇 Markdown。"""
+        try:
+            self.log("  - 提取文末参考文献...")
+            md_file = self.find_file_by_glob(raw_dir, f"{pdf_name}.md", "*.md")
+            content_list = self.find_file_by_glob(
+                raw_dir,
+                f"{pdf_name}_content_list.json",
+                "*_content_list.json",
+            )
+            if md_file is None and content_list is None:
+                self.log("    ⚠️  未找到 MinerU Markdown 或 content_list.json")
+                return False
+
+            markdown_content = ""
+            if md_file is not None:
+                markdown_content = md_file.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+            result = extract_references(markdown_content, content_list)
+            target_dir = extract_dir / "References"
+            target = target_dir / REFERENCE_REPORT_FILENAME
+            report = write_reference_report(extract_dir.name, result, target)
+            marker = target_dir / REFERENCE_SCAN_FILENAME
+            write_reference_scan_marker(marker, result, report is not None)
+
+            for warning in result.warnings:
+                self.log(f"    ⚠️  {warning}")
+            if report is None:
+                self.log(
+                    "    ⓘ 未识别到可信参考文献条目；"
+                    "扫描已完成，不生成 Markdown 报告"
+                )
+            else:
+                self.log(
+                    f"    ✓ 提取 {len(result.entries)} 条参考文献 "
+                    f"({result.extraction_method})"
+                )
+                self.log(f"    ✓ 已保存: {report}")
+            self.log(f"    ✓ 扫描状态: {marker}")
+            return True
+        except Exception as exc:
+            self.log(f"    ❌ 参考文献提取失败: {exc}")
             self.log(traceback.format_exc())
             return False
 

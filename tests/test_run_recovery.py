@@ -24,6 +24,7 @@ OPTIONS = {
     "extract_tables": True,
     "extract_sections": True,
     "extract_open_source": True,
+    "extract_references": True,
     "backend": "pipeline",
     "llm_model": "deepseek-chat",
     "llm_provider": "deepseek",

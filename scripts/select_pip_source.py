@@ -57,7 +57,7 @@ def _probe_source(source: tuple[str, str]) -> dict[str, object]:
         page_request = Request(
             project_url,
             headers={
-                "User-Agent": "PaperMiner/1.4.18",
+                "User-Agent": "PaperMiner/1.4.19",
                 "Accept": "application/vnd.pypi.simple.v1+html, text/html",
             },
         )
@@ -83,7 +83,7 @@ def _probe_source(source: tuple[str, str]) -> dict[str, object]:
         sample_request = Request(
             wheel_links[-1],
             headers={
-                "User-Agent": "PaperMiner/1.4.18",
+                "User-Agent": "PaperMiner/1.4.19",
                 "Range": f"bytes=0-{SAMPLE_BYTES - 1}",
             },
         )
