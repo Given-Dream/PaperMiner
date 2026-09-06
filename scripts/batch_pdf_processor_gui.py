@@ -61,7 +61,7 @@ os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")
 try:
     from version import __version__, __app_name__, __contact_email__
 except ImportError:
-    __version__ = "1.4.23"
+    __version__ = "1.4.24"
     __app_name__ = "PaperMiner"
     __contact_email__ = "2878705044@qq.com"
 
@@ -175,6 +175,7 @@ try:
         source_stem_for_directory,
         write_source_manifest,
     )
+    from raw_output_policy import FEATURE_KEYS
 except ImportError:
     from scripts.run_recovery import (
         INFLIGHT_DOCUMENT_STATES,
@@ -192,6 +193,7 @@ except ImportError:
         source_stem_for_directory,
         write_source_manifest,
     )
+    from scripts.raw_output_policy import FEATURE_KEYS
 
 # 设置标准输出编码为 UTF-8。
 # pythonw.exe 没有控制台，sys.stdout / sys.stderr 会是 None；doclayout_yolo
@@ -1568,6 +1570,15 @@ class BatchPDFProcessorGUI:
             "llm_provider": self.llm_settings.provider if self.llm_settings else "deepseek",
         }
 
+    def _selected_extraction_features(self) -> tuple[str, ...]:
+        """Return the captured selection in the worker CLI's stable order."""
+
+        return tuple(
+            feature
+            for feature in FEATURE_KEYS
+            if bool(self._run_option(f"extract_{feature}", False))
+        )
+
     def _run_option(self, name, default=None):
         return self._active_run_options.get(name, default)
 
@@ -2617,12 +2628,22 @@ class BatchPDFProcessorGUI:
             row=8, column=1, sticky=tk.W, pady=2
         )
 
+        ttk.Label(
+            options_frame,
+            text=(
+                'raw 同步按勾选项生成必要文件；以后若需补提未勾选内容，'
+                '须从原 PDF 重新处理。'
+            ),
+            style='Muted.TLabel',
+            wraplength=430,
+        ).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
         ttk.Separator(options_frame, orient='horizontal', bootstyle='secondary').grid(
-            row=9, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=8
+            row=10, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=8
         )
 
         llm_frame = ttk.Frame(options_frame)
-        llm_frame.grid(row=10, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        llm_frame.grid(row=11, column=0, columnspan=2, sticky=(tk.W, tk.E))
         llm_frame.grid_columnconfigure(1, weight=1)
         ttk.Label(llm_frame, text='LLM 模型').grid(
             row=0, column=0, sticky=tk.W, padx=(0, 8)
@@ -2651,7 +2672,7 @@ class BatchPDFProcessorGUI:
 
         backend_frame = ttk.Frame(options_frame)
         backend_frame.grid(
-            row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(9, 0)
+            row=12, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(9, 0)
         )
         backend_frame.grid_columnconfigure(1, weight=1)
         ttk.Label(backend_frame, text='MinerU 后端').grid(
@@ -2674,7 +2695,7 @@ class BatchPDFProcessorGUI:
 
         toggle_frame = ttk.Frame(options_frame)
         toggle_frame.grid(
-            row=12, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0)
+            row=13, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0)
         )
         toggle_frame.grid_columnconfigure(0, weight=1)
         toggle_frame.grid_columnconfigure(1, weight=1)
@@ -4782,6 +4803,8 @@ class BatchPDFProcessorGUI:
                 backend,
                 "--model-source",
                 model_source,
+                "--features",
+                ",".join(self._selected_extraction_features()),
             )
             worker_env = self._build_mineru_worker_env(device, model_source, gpu_id)
             if device == "cuda" and gpu_id is not None:

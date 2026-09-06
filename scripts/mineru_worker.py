@@ -20,6 +20,15 @@ import re
 import sys
 import traceback
 
+try:
+    from raw_output_policy import build_mineru_options, describe_policy, normalize_features
+except ImportError:
+    from scripts.raw_output_policy import (
+        build_mineru_options,
+        describe_policy,
+        normalize_features,
+    )
+
 
 MIN_MINERU_VERSION = (3, 1)
 MAX_MINERU_VERSION = (4, 0)
@@ -60,6 +69,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--backend", default="pipeline")
     parser.add_argument("--model-source", default="modelscope")
+    parser.add_argument(
+        "--features",
+        help=(
+            "Comma-separated PaperMiner extraction features. "
+            "Omitting it preserves legacy all-feature behaviour."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -72,6 +88,12 @@ def main() -> int:
         pass
 
     args = _parse_args()
+    try:
+        selected_features = normalize_features(getattr(args, "features", None))
+    except ValueError as exc:
+        print(f"[WORKER ERROR] raw 输出策略无效: {exc}", flush=True)
+        return 14
+    mineru_options = build_mineru_options(selected_features)
     input_path = args.input.resolve()
     output_path = args.output.resolve()
     if not input_path.is_file():
@@ -126,6 +148,21 @@ def main() -> int:
         )
         print(f"输入: {input_path.name}", flush=True)
         print(f"输出: {output_path}", flush=True)
+        feature_text, file_text = describe_policy(selected_features)
+        print(f"勾选内容: {feature_text}", flush=True)
+        print(f"raw 保留: {file_text}", flush=True)
+        print(
+            "识别开关: "
+            f"formula={'on' if mineru_options['formula_enable'] else 'off'}, "
+            f"table={'on' if mineru_options['table_enable'] else 'off'}, "
+            f"image_analysis={'on' if mineru_options['image_analysis'] else 'off'}",
+            flush=True,
+        )
+        if args.backend == "pipeline" and not mineru_options["image_analysis"]:
+            print(
+                "提示: pipeline 使用联合版面分析，未勾选图片时仍可能产生必要的图片中间文件。",
+                flush=True,
+            )
         if document_name != input_path.stem:
             print(f"路径保护: 使用短目录 {document_name}", flush=True)
         print("正在处理，请稍候...", flush=True)
@@ -139,8 +176,7 @@ def main() -> int:
             p_lang_list=["ch"],
             backend=args.backend,
             parse_method="auto",
-            formula_enable=True,
-            table_enable=True,
+            **mineru_options,
         )
         print("[WORKER OK] MinerU 处理完成", flush=True)
         return 0

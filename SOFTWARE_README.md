@@ -1,4 +1,4 @@
-# PaperMiner 1.4.23 软件版
+# PaperMiner 1.4.24 软件版
 
 ## 发布与安装
 
@@ -27,6 +27,7 @@ Setup 会在保留现有 PyTorch 前以及安装完成后，逐卡执行真实 F
 `PaperMiner.exe` 直接通过 `pythonw.exe` 启动 `scripts\batch_pdf_processor_gui.py`，主界面就是原“运行程序”打开的 GUI。
 
 - 正常启动不调用 PowerShell、`run.bat` 或 `运行程序.bat`，不会出现外部命令窗口。
+- v1.4.24 起，主界面“提取内容”勾选项也会传给 MinerU：公式/表格未选时关闭对应识别，raw 只保存所选功能需要的 Markdown、content list、middle JSON 或原 PDF 证据组合，不再生成 model/layout/span 调试文件。默认 pipeline 属于联合版面分析，仍可能产生必要的图片中间文件；若以后要补提未勾选内容，需保留原 PDF 并重新运行。
 - `PaperMiner.exe` 持有单实例锁；双击或连续点击不会创建第二个 GUI。
 - 启动器在后台监护 GUI，并通过 Windows 作业对象保证 GUI 结束后回收仍存活的 MinerU 后代进程。
 - v1.4.17 在 `%LOCALAPPDATA%\PaperMiner\recovery\runs.db` 保存 SQLite WAL 批次队列，并在每篇提取目录原子写入 `.paperminer-complete.json`。

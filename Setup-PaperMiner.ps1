@@ -150,7 +150,7 @@ try {
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = Join-Path $projectRoot 'PaperMiner.exe'
     $shortcut.WorkingDirectory = $projectRoot
-    $shortcut.Description = 'PaperMiner 1.4.23'
+    $shortcut.Description = 'PaperMiner 1.4.24'
     $shortcut.Save()
     Write-SetupLog ('Desktop shortcut: {0}' -f $shortcutPath)
 

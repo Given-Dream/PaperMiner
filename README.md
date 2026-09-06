@@ -7,9 +7,9 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#从源码运行)
 [![License](https://img.shields.io/badge/License-查看协议-green)](docs/LICENSE)
 
-当前开发版：**v1.4.23** · 最新公开版：[下载 v1.4.22 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.22/PaperMiner-v1.4.22-Setup.exe) · [查看 v1.4.22 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.22)
+当前版本：**v1.4.24** · [下载 v1.4.24 Setup.exe](https://github.com/Given-Dream/PaperMiner/releases/download/v1.4.24/PaperMiner-v1.4.24-Setup.exe) · [查看 v1.4.24 Release](https://github.com/Given-Dream/PaperMiner/releases/tag/v1.4.24)
 
-当前源码为 **v1.4.23**；最新公开安装包为 **v1.4.22**。v1.4.23 新增可审计的文章标题提取与合并，继续包含 RTX 30/40/50 系 PyTorch CUDA wheel 匹配、自检与自动修复。
+当前源码与公开安装包均为 **v1.4.24**。本版让 raw 输出策略同步服从主界面勾选项，并继续包含文章标题提取、RTX 30/40/50 系 PyTorch CUDA wheel 匹配、自检与自动修复。
 
 ![PaperMiner 横向工作台](docs/images/paperminer-v1.4.2-dashboard.png)
 
@@ -30,6 +30,13 @@ PaperMiner 以 MinerU 为解析后端，在一个界面中完成 PDF 批处理�
 | 参考文献 | 优先读取 MinerU `ref_text`，按原文顺序生成逐篇 `References/参考文献.md` |
 
 章节归类采用“正则规则优先、LLM 按需补充”的方式。不配置 API 也能工作；配置 DeepSeek 或 OpenAI 兼容接口后，可对缺失或异常章节进行辅助识别。
+
+## v1.4.24 按勾选项生成 raw
+
+- 主界面勾选项现在同时控制 MinerU 识别开关、raw 文件组合和第二阶段 `extract`。未勾选公式或表格时，对应模型不会启动；VLM / hybrid 未勾选图片时也会关闭图片语义分析。
+- PaperMiner 不再保存未使用的 model JSON、layout bbox PDF 和 span bbox PDF。只选择章节时，raw 只需要文本 Markdown；选择图片时才额外保留用于整图重建的 middle JSON 和原 PDF。标题、代码/数据链接等需要核验原文的功能会保留相应证据，多个勾选项按依赖取并集。
+- MinerU 的默认 `pipeline` 是联合版面分析：正文、标题、参考文献和图片位置不是八个完全独立的模型。因此未勾选图片时仍可能出现版面分析需要的图片中间文件；这不代表 PaperMiner 会在 `extract` 中输出图片，也不承诺按比例减少总推理时间。
+- raw 现在是“本次勾选结果的最小可重提取集合”，不再是万能归档。若以后想补提本次未勾选的项目，请保留原 PDF 并重新运行完整流程。
 
 ## v1.4.23 文章标题提取与汇总
 

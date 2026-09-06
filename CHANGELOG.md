@@ -1,5 +1,15 @@
 # PaperMiner 更新日志
 
+## v1.4.24 (2026-09-05)
+
+- 主界面的八个“提取内容”复选框同时驱动 MinerU raw 策略，不再只控制第二阶段 `extract`；隔离 worker 通过显式 `--features` 参数接收每批次已冻结的选择，闪退恢复仍复用同一组设置。
+- 未勾选公式或表格时分别关闭 MinerU 的公式识别和表格识别；VLM / hybrid 后端未勾选图片时关闭图片语义分析。默认 pipeline 仍执行联合版面分析，因此可能留下必要图片中间文件，但不再把它误报为已选图片输出。
+- raw 只落盘当前提取项需要的文件组合：章节单选只需文本 Markdown；图片会保留 `content list + middle JSON + 原 PDF` 以支持整图重建；标题和代码/数据链接保留原 PDF 作为可审计证据；其他组合按消费者依赖自动取并集。
+- 不再生成 PaperMiner 未消费的 MinerU model JSON、layout bbox PDF 和 span bbox PDF；没有图表需求时改用 `nlp_markdown`，避免 Markdown 嵌入未选择的视觉块。
+- 主界面明确提示：raw 是所选结果的最小中间集合，今后若要从 raw 补提本次未勾选的内容，必须重新处理原 PDF；worker 日志逐篇列出勾选内容、raw 保留文件及模型开关。
+
+---
+
 ## v1.4.23 (开发版)
 
 - 主界面新增“文章标题 / Markdown”提取项，默认启用；每篇论文生成 `Title/文章标题.md`，并写入 `Title/title_scan.json` 审计与完成标记。
